@@ -4,6 +4,7 @@
 #include "../include/blood-flow-system-1d3d.h"
 
 #include <deal.II/base/function_parser.h>
+#include <deal.II/base/types.h>
 
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
 
@@ -41,16 +42,16 @@ namespace dealii
     return elastic_modulus * (std::pow(ratio, m) - 1.0) + reference_pressure;
   }
 
-  // Advection field b (tangential to curve)
-  template <int dim, int spacedim>
-  Tensor<1, spacedim>
-  advection_field_b(const Point<spacedim> &p)
-  {
-    Tensor<1, spacedim> b_field;
-    // For 1D in 3D, b is tangential to the curve
-    b_field[0] = 1.0; // tangential direction along x
-    return b_field;
-  }
+  //   // Advection field b (tangential to curve)
+  //   template <int dim, int spacedim>
+  //   Tensor<1, spacedim>
+  //   advection_field_b(const Point<spacedim> &p)
+  //   {
+  //     Tensor<1, spacedim> b_field;
+  //     // For 1D in 3D, b is tangential to the curve
+  //     b_field[0] = 1.0; // tangential direction along x
+  //     return b_field;
+  //   }
 
   template <int dim, int spacedim>
   struct BloodFlowScratchData
@@ -282,7 +283,10 @@ namespace dealii
 
       for (unsigned int point = 0; point < fe_v.n_quadrature_points; ++point)
         {
-          const auto b_vec = advection_field_b<dim, spacedim>(q_points[point]);
+          //   const auto b_vec = advection_field_b<dim,
+          //   spacedim>(q_points[point]);
+          const auto b_vec = (cell->vertex(1) - cell->vertex(0)) /
+                             cell->vertex(1).distance(cell->vertex(0));
           const double A_old =
             old_solution_values[point][0]; // Area at previous time
           const double U_old =
@@ -323,10 +327,11 @@ namespace dealii
 
                   else if (component_i == 1 && component_j == 1) // U-U block
                     {
-                      // Compute dpda once for this point
-                      const double dpda =
-                        elastic_modulus * 0.5 *
-                        std::pow(A_old / reference_area, -0.5) / reference_area;
+                      //   // Compute dpda once for this point
+                      //   const double dpda =
+                      //     elastic_modulus * 0.5 *
+                      //     std::pow(A_old / reference_area, -0.5) /
+                      //     reference_area;
 
                       // Semi-implicit nonlinear convection: U_old ∇U
                       const double nonlinear_conv =
@@ -362,91 +367,105 @@ namespace dealii
         }
     };
 
-    const auto face_worker = [&](const Iterator     &cell,
-                                 const unsigned int &f,
-                                 const unsigned int &sf,
-                                 const Iterator     &ncell,
-                                 const unsigned int &nf,
-                                 const unsigned int &nsf,
-                                 BloodFlowScratchData<dim, spacedim>
-                                                   &scratch_data,
-                                 BloodFlowCopyData &copy_data) {
-      FEInterfaceValues<dim, spacedim> &fe_iv =
-        scratch_data.fe_interface_values;
-      fe_iv.reinit(cell, f, sf, ncell, nf, nsf);
-      const auto &q_points = fe_iv.get_quadrature_points();
+    const auto face_worker =
+      [&](const Iterator                      &cell,
+          const unsigned int                  &f,
+          const unsigned int                  &sf,
+          const Iterator                      &ncell,
+          const unsigned int                  &nf,
+          const unsigned int                  &nsf,
+          BloodFlowScratchData<dim, spacedim> &scratch_data,
+          BloodFlowCopyData                   &copy_data) {
+        FEInterfaceValues<dim, spacedim> &fe_iv =
+          scratch_data.fe_interface_values;
+        fe_iv.reinit(cell, f, sf, ncell, nf, nsf);
+        const auto &q_points = fe_iv.get_quadrature_points();
 
-      copy_data.face_data.emplace_back();
-      BloodFlowCopyDataFace &copy_data_face = copy_data.face_data.back();
+        copy_data.face_data.emplace_back();
+        BloodFlowCopyDataFace &copy_data_face = copy_data.face_data.back();
 
-      const unsigned int n_dofs        = fe_iv.n_current_interface_dofs();
-      copy_data_face.joint_dof_indices = fe_iv.get_interface_dof_indices();
-      copy_data_face.cell_matrix.reinit(n_dofs, n_dofs);
+        const unsigned int n_dofs        = fe_iv.n_current_interface_dofs();
+        copy_data_face.joint_dof_indices = fe_iv.get_interface_dof_indices();
+        copy_data_face.cell_matrix.reinit(n_dofs, n_dofs);
 
-      const std::vector<double> &JxW     = fe_iv.get_JxW_values();
-      const auto                &normals = fe_iv.get_normal_vectors();
+        const std::vector<double> &JxW     = fe_iv.get_JxW_values();
+        const auto                &normals = fe_iv.get_normal_vectors();
 
-      // Get old solution values at interface
-      std::vector<Vector<double>> old_solution_face_values(q_points.size(),
-                                                           Vector<double>(2));
-      fe_iv.get_fe_face_values(0).get_function_values(solution_old,
-                                                      old_solution_face_values);
+        // Get old solution values at interface
+        std::vector<Vector<double>> old_solution_face_values(q_points.size(),
+                                                             Vector<double>(2));
+        fe_iv.get_fe_face_values(0).get_function_values(
+          solution_old, old_solution_face_values);
 
-      for (unsigned int qpoint = 0; qpoint < q_points.size(); ++qpoint)
-        {
-          const auto b_vec = advection_field_b<dim, spacedim>(q_points[qpoint]);
-          const double b_dot_n     = b_vec * normals[qpoint];
-          const double abs_b_dot_n = std::abs(b_dot_n);
+        for (unsigned int qpoint = 0; qpoint < q_points.size(); ++qpoint)
+          {
+            //   const auto b_vec = advection_field_b<dim,
+            //   spacedim>(q_points[qpoint]);
+            const auto b_vec = (cell->vertex(1) - cell->vertex(0)) /
+                               cell->vertex(1).distance(cell->vertex(0));
+            const double b_dot_n     = b_vec * normals[qpoint];
+            const double abs_b_dot_n = std::abs(b_dot_n);
 
-          const double A_old = old_solution_face_values[qpoint][0];
-          const double U_old = old_solution_face_values[qpoint][1];
+            const double A_old = old_solution_face_values[qpoint][0];
+            const double U_old = old_solution_face_values[qpoint][1];
 
-          for (unsigned int i = 0; i < n_dofs; ++i)
-            {
-              const auto dof_indices_i = fe_iv.interface_dof_to_dof_indices(i);
-              const unsigned int component_i =
-                fe->system_to_component_index(dof_indices_i[0]).first;
+            for (unsigned int i = 0; i < n_dofs; ++i)
+              {
+                const auto localdof_indices =
+                  fe_iv.interface_dof_to_dof_indices(i);
+                const auto local_i =
+                  localdof_indices[0] != numbers::invalid_unsigned_int ?
+                    localdof_indices[0] :
+                    localdof_indices[1];
 
-              for (unsigned int j = 0; j < n_dofs; ++j)
-                {
-                  const auto dof_indices_j =
-                    fe_iv.interface_dof_to_dof_indices(j);
-                  const unsigned int component_j =
-                    fe->system_to_component_index(dof_indices_j[0]).first;
+                const unsigned int component_i =
+                  fe->system_to_component_index(local_i).first;
 
-                  // Interface terms for the coupled system
-                  if (component_i == component_j)
-                    {
-                      // Upwind stabilization for both equations
-                      const double stabilization =
-                        theta * abs_b_dot_n *
-                        fe_iv.jump_in_shape_values(j, qpoint) *
-                        fe_iv.jump_in_shape_values(i, qpoint);
+                for (unsigned int j = 0; j < n_dofs; ++j)
+                  {
+                    const auto localdof_indices =
+                      fe_iv.interface_dof_to_dof_indices(j);
+                    const auto local_j =
+                      localdof_indices[0] != numbers::invalid_unsigned_int ?
+                        localdof_indices[0] :
+                        localdof_indices[1];
 
-                      // Consistency terms (different for each equation)
-                      double consistency = 0.0;
-                      if (component_i == 0) // Area equation
-                        {
-                          consistency =
-                            A_old * b_dot_n *
-                            fe_iv.average_of_shape_values(j, qpoint) *
-                            fe_iv.jump_in_shape_values(i, qpoint);
-                        }
-                      else // Velocity equation
-                        {
-                          consistency =
-                            U_old * b_dot_n *
-                            fe_iv.average_of_shape_values(j, qpoint) *
-                            fe_iv.jump_in_shape_values(i, qpoint);
-                        }
+                    const unsigned int component_j =
+                      fe->system_to_component_index(local_j).first;
 
-                      copy_data_face.cell_matrix(i, j) +=
-                        (consistency + stabilization) * JxW[qpoint];
-                    }
-                }
-            }
-        }
-    };
+                    // Interface terms for the coupled system
+                    if (component_i == component_j)
+                      {
+                        // Upwind stabilization for both equations
+                        const double stabilization =
+                          theta * abs_b_dot_n *
+                          fe_iv.jump_in_shape_values(j, qpoint) *
+                          fe_iv.jump_in_shape_values(i, qpoint);
+
+                        // Consistency terms (different for each equation)
+                        double consistency = 0.0;
+                        if (component_i == 0) // Area equation
+                          {
+                            consistency =
+                              A_old * b_dot_n *
+                              fe_iv.average_of_shape_values(j, qpoint) *
+                              fe_iv.jump_in_shape_values(i, qpoint);
+                          }
+                        else // Velocity equation
+                          {
+                            consistency =
+                              U_old * b_dot_n *
+                              fe_iv.average_of_shape_values(j, qpoint) *
+                              fe_iv.jump_in_shape_values(i, qpoint);
+                          }
+
+                        copy_data_face.cell_matrix(i, j) +=
+                          (consistency + stabilization) * JxW[qpoint];
+                      }
+                  }
+              }
+          }
+      };
 
     const auto boundary_worker =
       [&](const Iterator                      &cell,
@@ -464,8 +483,9 @@ namespace dealii
 
         for (unsigned int point = 0; point < q_points.size(); ++point)
           {
-            const auto b_vec =
-              advection_field_b<dim, spacedim>(q_points[point]);
+            const auto b_vec = (cell->vertex(1) - cell->vertex(0)) /
+                               cell->vertex(1).distance(cell->vertex(0));
+            // advection_field_b<dim, spacedim>(q_points[point]);
             const double b_dot_n     = b_vec * normals[point];
             const double abs_b_dot_n = std::abs(b_dot_n);
 
@@ -571,7 +591,7 @@ namespace dealii
   BloodFlowSystem<dim, spacedim>::output_results(const unsigned int cycle) const
   {
     const std::string filename =
-      output_filename + "-" + std::to_string(cycle) + ".vtk";
+      output_filename + "-" + std::to_string(cycle) + ".vtu";
     std::cout << "  Writing solution to <" << filename << ">" << std::endl;
     std::ofstream output(filename);
 
@@ -590,10 +610,22 @@ namespace dealii
                              solution_names,
                              DataOut<dim, spacedim>::type_dof_data,
                              data_component_interpretation);
+    solution_names[0] = "pressure";
+    solution_names[1] = "unused";
+    data_out.add_data_vector(pressure,
+                             solution_names,
+                             DataOut<dim, spacedim>::type_dof_data,
+                             data_component_interpretation);
 
-    data_out.add_data_vector(pressure, "pressure");
+    // data_out.add_data_vector(pressure, "pressure");
     data_out.build_patches();
-    data_out.write_vtk(output);
+    data_out.write_vtu(output);
+
+    // Also write the pvd record
+    static std::vector<std::pair<double, std::string>> pvd_output_records;
+    pvd_output_records.push_back(std::make_pair(time, filename));
+    std::ofstream pvd_output(output_filename + ".pvd");
+    DataOutBase::write_pvd_record(pvd_output, pvd_output_records);
   }
 
   template <int dim, int spacedim>
@@ -691,6 +723,9 @@ namespace dealii
       static_cast<unsigned int>(std::round(final_time / time_step));
     system_matrix_time.reinit(sparsity_pattern);
     tmp_vector.reinit(dof_handler.n_dofs());
+
+    std::cout << "  Number of time steps: " << n_time_steps
+              << " with time step size dt=" << time_step << std::endl;
 
     SparseDirectUMFPACK direct;
     if (use_direct_solver)

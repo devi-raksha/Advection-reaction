@@ -90,16 +90,16 @@ namespace dealii
     DoFHandler<dim, spacedim>                dof_handler;
     std::unique_ptr<FESystem<dim, spacedim>> fe;
     // Parameters exposed via add_parameter()
-    unsigned int        fe_degree;
+    unsigned int        fe_degree = 1;
     std::vector<double> constants;
-    std::string         rhs_expression;
-    std::string         initial_A_expression;
-    std::string         initial_U_expression;
-    std::string         pressure_bc_expression;
-    bool                use_direct_solver;
-    unsigned int        n_refinement_cycles;
-    unsigned int        n_global_refinements;
-    double              final_time;
+    std::string         rhs_expression         = "0.0";
+    std::string         initial_A_expression   = "1.0";
+    std::string         initial_U_expression   = "0.0";
+    std::string         pressure_bc_expression = "0.0";
+    bool                use_direct_solver      = true;
+    unsigned int        n_refinement_cycles    = 1;
+    unsigned int        n_global_refinements   = 3;
+    double              final_time             = 1.0;
 
     // Mesh and system setup
     void
@@ -151,14 +151,14 @@ namespace dealii
     unsigned int n_time_steps;
 
     // Parameters
-    double rho;
-    double viscosity_c;
-    double reference_area;
-    double elastic_modulus;
-    double reference_pressure;
-    double theta;
+    double rho                = 1.0;
+    double viscosity_c        = 1.0;
+    double reference_area     = 1.0;
+    double elastic_modulus    = 1.0;
+    double reference_pressure = 1.0;
+    double theta              = 1.0;
 
-    std::string output_filename;
+    std::string output_filename = "output.vtk";
   };
 
 } // namespace dealii
