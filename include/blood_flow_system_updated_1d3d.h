@@ -37,6 +37,7 @@
 #include <deal.II/fe/fe_system.h>
 #include <deal.II/fe/fe_values.h>
 #include <deal.II/fe/mapping_q.h>
+#include <deal.II/fe/fe_values_extractors.h>
 
 #include <deal.II/grid/grid_generator.h> // for hyper_cube
 #include <deal.II/grid/tria.h>
@@ -67,8 +68,8 @@ namespace dealii
      * @brief Blood flow system solver for Triangulation<1,3>
      *
      * Solves:
-     *   A_t + b · ∇_\Gamma(AU) = 0
-     *   U_t + U ∇_\Gamma U + (1/ρ) ∇_\Gamma P(A) + c U = 0
+     *   A_t + b · \nabla_\Gamma(AU) = 0
+     *   U_t + U \nabla_\Gamma U + (1/ρ) \nabla_\Gamma P(A) + c U = 0
      */
 
     template <int dim, int spacedim>
@@ -84,6 +85,9 @@ namespace dealii
         initialize_params(const std::string &filename);
 
     private:
+        const FEValuesExtractors::Scalar area_extractor;
+        const FEValuesExtractors::Scalar velocity_extractor;
+
         // Declare all necessary objects
         Triangulation<dim, spacedim> triangulation;
 
