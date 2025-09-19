@@ -31,6 +31,7 @@
 SET(TARGET1 "DG_advection_reaction_estimator")
 SET(TARGET2 "DG_advection_reaction_embedded_estimator")
 SET(TARGET3 "blood-flow-system-1d3d")
+SET(TARGET4 "blood_flow_system_updated_1d3d")
 
 # Declare all source files for each target:
 SET(TARGET1_SRC
@@ -46,6 +47,11 @@ SET(TARGET2_SRC
 set(TARGET3_SRC
   source/blood-flow-system-1d3d.cc
   main_1d3d.cc
+)
+
+set(TARGET4_SRC
+  source/blood_flow_system_updated_1d3d.cc
+  main_updated_1d3d.cc
 )
 
 CMAKE_MINIMUM_REQUIRED(VERSION 3.13.4)
@@ -75,3 +81,7 @@ DEAL_II_SETUP_TARGET(${TARGET2})
 # Create third executable target
 ADD_EXECUTABLE(${TARGET3} ${TARGET3_SRC})
 DEAL_II_SETUP_TARGET(${TARGET3})
+
+# Create fourth executable target
+ADD_EXECUTABLE(${TARGET4} ${TARGET4_SRC})
+DEAL_II_SETUP_TARGET(${TARGET4})
