@@ -308,7 +308,7 @@ namespace dealii
                             fe_v[area_extractor].value(i, point) *
                             fe_v[area_extractor].value(j, point) * JxW[point]; // Mass term
 
-                        // A-U block  like A_old*b\cdot \nabla_{\Gamma} U
+                        // A-U block  like A_old*b\cdot \nabla_{\Gamma} U = A_old*
 
                         const double b_gradU = b_vec * fe_v[velocity_extractor].gradient(j, point); // removes product error
                         copy_data.cell_matrix(i, j) +=
@@ -329,7 +329,7 @@ namespace dealii
 
                         copy_data.cell_matrix(i, j) += (nonlinear_conv + reaction) * JxW[point];
 
-                        // U-A block : pressure gradient term  -(1/\rho)\nabla_{\Gamma} P = -(1/\rho)(dP/dA)\nabla_{\Gamma} A
+                        // U-A block : pressure gradient term  -(1/\rho)\nabla_{\Gamma} P = -(1/\rho)(dP/dA) A \nabla \phi_u
 
                         if (A_old > 1e-12) // Avoid division by zero
                         {
@@ -488,7 +488,7 @@ namespace dealii
                                     (area_bc_data * area_face.value(i, point) +
                                      velocity_bc_data * velocity_face.value(i, point))
 
-                                // Consistency terms (optional, depending on your formulation)
+                                // Consistency terms
                                 // For area equation: weak enforcement of AU flux
                                 - area_bc_data * velocity_bc_data * b_dot_n * area_face.value(i, point)
 
@@ -651,46 +651,51 @@ namespace dealii
         assemble_mass_matrix();
 
         // 4. Set initial conditions
-        const std::string vars = (spacedim == 1 ? "x" : spacedim == 2 ? "x,y"
-                                                                      : "x,y,z");
+        // const std::string vars = (spacedim == 1 ? "x" : spacedim == 2 ? "x,y"
+        //                                                               : "x,y,z");
 
         // Project initial conditions
         AffineConstraints<double> constraints;
         constraints.close();
 
-        // Create combined initial condition function
-        // Create combined initial condition function
-        std::vector<std::string> expressions(2);
-        expressions[0] = initial_A_expression;
-        expressions[1] = initial_U_expression;
+        // // Create combined initial condition function
+        // std::vector<std::string> expressions(2);
+        // expressions[0] = initial_A_expression;
+        // expressions[1] = initial_U_expression;
 
-        // Create a simple vector function for initial conditions
-        class InitialCondition : public Function<spacedim>
-        {
-        public:
-            InitialCondition()
-                : Function<spacedim>(2)
-            {
-            } // 2 components
+        // // Create a simple vector function for initial conditions
+        // class InitialCondition : public Function<spacedim>
+        // {
+        // public:
+        //     InitialCondition()
+        //         : Function<spacedim>(2)
+        //     {
+        //     } // 2 components
 
-            virtual double
-            value(const Point<spacedim> & /*p*/,
-                  const unsigned int component = 0) const override
+        //     virtual double
+        //     value(const Point<spacedim> & /*p*/,
+        //           const unsigned int component = 0) const override
 
-            {
-                if (component == 0) // Area
-                    return 1.0;     // or parse initial_A_expression
-                else                // Velocity
-                    return 0.0;     // or parse initial_U_expression
-            }
-        };
+        //     {
+        //         if (component == 0) // Area
+        //             return 1.0;     // or parse initial_A_expression
+        //         else                // Velocity
+        //             return 0.0;     // or parse initial_U_expression
+        //     }
+        // };
 
-        InitialCondition initial_condition;
+        // InitialCondition initial_condition;
+
+        // VectorTools::project(dof_handler,
+        //                      constraints,
+        //                      QGauss<dim>(fe->tensor_degree() + 1),
+        //                      initial_condition,
+        //                      solution);
 
         VectorTools::project(dof_handler,
                              constraints,
                              QGauss<dim>(fe->tensor_degree() + 1),
-                             initial_condition,
+                             exact_solution,
                              solution);
 
         solution_old = solution;
@@ -734,7 +739,7 @@ namespace dealii
             system_matrix_time.copy_from(system_matrix);
             system_matrix_time.add(1.0 / time_step, mass_matrix);
 
-            // Form right-hand side: M/dt * u_old + b
+            // Form right-hand side: M/dt * u_old + right_hand
             mass_matrix.vmult(tmp_vector, solution_old);
             tmp_vector *= (1.0 / time_step);
             tmp_vector += right_hand_side;

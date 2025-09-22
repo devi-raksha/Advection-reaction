@@ -99,7 +99,7 @@ namespace dealii
             value(const Point<spacedim> &p,
                   const unsigned int component = 0) const override
             {
-                // Parameters matching the Python version
+                // Parameters matching
                 const double r0 = 9.99e-3;
                 const double a0 = numbers::PI * r0 * r0;
                 const double L = 1.0;
@@ -192,7 +192,6 @@ namespace dealii
 
         // So far we declared the usual objects. Hereafter we declare
         // `FunctionParser<dim>` objects
-        FunctionParser<spacedim> parsed_exact_solution;
         FunctionParser<spacedim> initial_A;
         FunctionParser<spacedim> initial_U;
         FunctionParser<spacedim> rhs;
