@@ -61,6 +61,8 @@
 #include <fstream>
 #include <iostream>
 
+#include <deal.II/base/function_parser.h> // for FunctionParser
+
 namespace dealii
 {
 
@@ -68,7 +70,7 @@ namespace dealii
      * @brief Blood flow system solver for Triangulation<1,3>
      *
      * Solves:
-     *   A_t + b · \nabla_\Gamma(AU) = 0
+     *   A_t + b · \nabla (AU) = 0
      *   U_t + U \nabla_\Gamma U + (1/ρ) \nabla_\Gamma P(A) + c U = 0
      */
 
@@ -87,6 +89,54 @@ namespace dealii
     private:
         const FEValuesExtractors::Scalar area_extractor;
         const FEValuesExtractors::Scalar velocity_extractor;
+
+        class ExactSolution : public Function<spacedim>
+        {
+        public:
+            ExactSolution() : Function<spacedim>(2) {} // two components: A and U
+
+            virtual double
+            value(const Point<spacedim> &p,
+                  const unsigned int component = 0) const override
+            {
+                // Parameters matching the Python version
+                const double r0 = 9.99e-3;
+                const double a0 = numbers::PI * r0 * r0;
+                const double L = 1.0;
+                const double T0 = 1.0;
+                const double atilde = 0.1 * a0;
+                const double qtilde = 0.0;
+
+                const double x = p[0];
+                const double t = this->get_time();
+
+                if (component == 0) // area A
+                    return a0 + atilde * std::sin(2.0 * numbers::PI * x / L) *
+                                    std::cos(2.0 * numbers::PI * t / T0);
+                else // velocity U
+                    return qtilde - (atilde * L / T0) *
+                                        std::cos(2.0 * numbers::PI * x / L) *
+                                        std::sin(2.0 * numbers::PI * t / T0);
+            }
+
+            virtual void
+            vector_value(const Point<spacedim> &p, Vector<double> &values) const override
+            {
+                Assert(values.size() == 2, ExcDimensionMismatch(values.size(), 2));
+                values[0] = value(p, 0);
+                values[1] = value(p, 1);
+            }
+
+            virtual void
+            vector_value_list(const std::vector<Point<spacedim>> &points,
+                              std::vector<Vector<double>> &value_list) const override
+            {
+                const unsigned int n = points.size();
+                Assert(value_list.size() == n, ExcDimensionMismatch(value_list.size(), n));
+                for (unsigned int i = 0; i < n; ++i)
+                    vector_value(points[i], value_list[i]);
+            }
+        };
 
         // Declare all necessary objects
         Triangulation<dim, spacedim> triangulation;
@@ -142,7 +192,7 @@ namespace dealii
 
         // So far we declared the usual objects. Hereafter we declare
         // `FunctionParser<dim>` objects
-        FunctionParser<spacedim> exact_solution;
+        FunctionParser<spacedim> parsed_exact_solution;
         FunctionParser<spacedim> initial_A;
         FunctionParser<spacedim> initial_U;
         FunctionParser<spacedim> rhs;
@@ -160,7 +210,7 @@ namespace dealii
         double reference_area = 1.0;
         double elastic_modulus = 1.0;
         double reference_pressure = 1.0;
-        double theta = 1.0;
+        double theta = 0.5;
 
         std::string output_filename = "output.vtk";
     };

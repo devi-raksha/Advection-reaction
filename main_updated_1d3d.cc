@@ -13,8 +13,8 @@
  *  --------------------------------------------------------------------------
  */
 
-#include <deal.II/base/logstream.h>         // deallog control
-#include <deal.II/base/parameter_handler.h> // only needed for better hints
+#include <deal.II/base/logstream.h> // deallog control
+#include <deal.II/base/parameter_handler.h>
 #include <iostream>
 #include <stdexcept> // for std::invalid_argument
 

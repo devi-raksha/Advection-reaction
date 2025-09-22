@@ -1,7 +1,7 @@
 /* --------------------------------------------------------------------------
  */
 
-#include "../include/blood-flow-system-1d3d.h"
+#include "../include/blood_flow_system_updated_1d3d.h"
 
 #include <deal.II/base/function_parser.h>
 #include <deal.II/base/types.h>
@@ -41,17 +41,6 @@ namespace dealii
         const double m = 0.5; // tube law exponent
         return elastic_modulus * (std::pow(ratio, m) - 1.0) + reference_pressure;
     }
-
-    //   // Advection field b (tangential to curve)
-    //   template <int dim, int spacedim>
-    //   Tensor<1, spacedim>
-    //   advection_field_b(const Point<spacedim> &p)
-    //   {
-    //     Tensor<1, spacedim> b_field;
-    //     // For 1D in 3D, b is tangential to the curve
-    //     b_field[0] = 1.0; // tangential direction along x
-    //     return b_field;
-    //   }
 
     template <int dim, int spacedim>
     struct BloodFlowScratchData
@@ -273,7 +262,7 @@ namespace dealii
             return 4.0 * degree * (degree + 1.0) * 0.5 * (1.0 / extent1 + 1.0 / extent2);
         };
 
-        // Cell worker which handles volum integral terms
+        // Cell worker which handles volume integral terms
 
         auto cell_worker = [&](const Iterator &cell,
                                BloodFlowScratchData<dim, spacedim> &scratch_data,
@@ -305,7 +294,7 @@ namespace dealii
                 const double U_old =
                     old_velocity_values[point]; // Velocity at previous time
 
-                // TO obtain RHS value
+                // To obtain RHS values
                 const double rhs_value = rhs.value(q_points[point]);
 
                 for (unsigned int i = 0; i < n_dofs; ++i)
@@ -330,7 +319,7 @@ namespace dealii
                         //     (b_vec * fe_v[velocity_extractor].value(j, point)) * JxW[point];
 
                         // Velocity equation: \partial U/ \partial t + U\nabla_{\Gamma} U + (1/\rho)\nabla_{\Gamma} P + cU =0
-                        // U-U block : nonlinear convection+ viscosity
+                        // U-U block : nonlinear convection+ viscosity term
                         const double nonlinear_conv = U_old *
                                                       (fe_v[velocity_extractor].gradient(i, point)[0] *
                                                        fe_v[velocity_extractor].value(j, point));
@@ -439,6 +428,8 @@ namespace dealii
             }
         };
 
+        typename BloodFlowSystem<dim, spacedim>::ExactSolution exact_solution;
+        exact_solution.set_time(time);
         // Boundary worker lambda - handles boundary face integrals
         auto boundary_worker = [&](const Iterator &cell,
                                    const unsigned int &face_no,
@@ -457,6 +448,10 @@ namespace dealii
             const auto &JxW = fe_face.get_JxW_values();
             const auto &normals = fe_face.get_normal_vectors();
 
+            // Extract boundary data from exact solution
+            std::vector<Vector<double>> g_values(q_points.size(), Vector<double>(2));
+            exact_solution.vector_value_list(q_points, g_values);
+
             const double degree = std::max(1.0, static_cast<double>(fe_face.get_fe().degree));
             const double extent1 = cell->measure(); // Fixed to call measure() as a function
             const double penalty = penalty_parameter(degree, extent1, extent1);
@@ -466,6 +461,10 @@ namespace dealii
                 const auto b_vec = (cell->vertex(1) - cell->vertex(0)) /
                                    cell->vertex(1).distance(cell->vertex(0));
                 const double b_dot_n = b_vec * normals[point];
+
+                // Extract boundary values at this quadrature point
+                const double area_bc_data = g_values[point](0);     // A from exact solution
+                const double velocity_bc_data = g_values[point](1); // U from exact solution
 
                 if (b_dot_n < 0) // Inflow boundary
                 {
@@ -481,15 +480,33 @@ namespace dealii
                                 JxW[point];
                         }
 
-                        // Boundary conditions
-                        const double area_bc = reference_area;
-                        const double velocity_bc = 0.0;
-
+                        // RHS terms with these using exact solution data:
                         copy_data.cell_rhs(i) +=
-                            -theta * penalty * std::abs(b_dot_n) *
-                            (area_bc * area_face.value(i, point) +
-                             velocity_bc * velocity_face.value(i, point)) *
+                            (
+                                // Penalty enforcement: \theta*\sigma*|b·n|* boundary_data·\phi for both area and velocity
+                                theta * penalty * std::abs(b_dot_n) *
+                                    (area_bc_data * area_face.value(i, point) +
+                                     velocity_bc_data * velocity_face.value(i, point))
+
+                                // Consistency terms (optional, depending on your formulation)
+                                // For area equation: weak enforcement of AU flux
+                                - area_bc_data * velocity_bc_data * b_dot_n * area_face.value(i, point)
+
+                                // For velocity equation: weak enforcement of momentum flux
+                                - velocity_bc_data * velocity_bc_data * b_dot_n * velocity_face.value(i, point)
+
+                                    ) *
                             JxW[point];
+
+                        // // Boundary conditions
+                        // const double area_bc = reference_area;
+                        // const double velocity_bc = 0.0;
+
+                        // copy_data.cell_rhs(i) +=
+                        //     -theta * penalty * std::abs(b_dot_n) *
+                        //     (area_bc * area_face.value(i, point) +
+                        //      velocity_bc * velocity_face.value(i, point)) *
+                        //     JxW[point];
                     }
                 }
             }
@@ -626,6 +643,10 @@ namespace dealii
         std::cout << "  Number of degrees of freedom: " << dof_handler.n_dofs()
                   << std::endl;
 
+        typename BloodFlowSystem<dim, spacedim>::ExactSolution exact_solution;
+
+        exact_solution.set_time(0.0);
+
         // 3. Assemble mass matrix
         assemble_mass_matrix();
 
@@ -700,6 +721,9 @@ namespace dealii
         for (unsigned int step = 1; step <= n_time_steps; ++step)
         {
             time += time_step;
+            // update bc time in functions
+            exact_solution.set_time(time);
+
             std::cout << "Step " << step << "  t=" << time << std::endl;
 
             // Assemble system matrix (depends on solution_old for semi-implicit
