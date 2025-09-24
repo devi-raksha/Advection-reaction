@@ -12,6 +12,8 @@
 
 #include <deal.II/numerics/vector_tools.h>
 
+#include <algorithm>
+
 namespace dealii
 {
 
@@ -32,10 +34,10 @@ namespace dealii
 
     template <int dim, int spacedim>
     double
-    compute_pressure(const double area,
-                     const double reference_area,
-                     const double elastic_modulus,
-                     const double reference_pressure)
+    compute_pressure_value(const double area,
+                           const double reference_area,
+                           const double elastic_modulus,
+                           const double reference_pressure)
     {
         const double ratio = area / reference_area;
         const double m = 0.5; // tube law exponent
@@ -301,42 +303,39 @@ namespace dealii
                 {
                     for (unsigned int j = 0; j < n_dofs; ++j)
                     {
-                        // Area equation : \partial A/ \partial t + \nabla_{\Gamma}\cdot (AU) =0
 
-                        // A-A block
-                        copy_data.cell_matrix(i, j) +=
-                            fe_v[area_extractor].value(i, point) *
-                            fe_v[area_extractor].value(j, point) * JxW[point]; // Mass term
-
-                        // A-U block  like A_old*b\cdot \nabla_{\Gamma} U = A_old*
+                        // A-U block
 
                         const double b_gradU = b_vec * fe_v[velocity_extractor].gradient(j, point); // removes product error
-                        copy_data.cell_matrix(i, j) +=
+                        copy_data.cell_matrix(i, j) -=
                             fe_v[area_extractor].value(i, point) * A_old *
                             b_gradU * JxW[point];
-                        // copy_data.cell_matrix(i, j) +=
-                        //     fe_v[area_extractor].value(i, point) * A_old *
-                        //     (b_vec * fe_v[velocity_extractor].value(j, point)) * JxW[point];
 
-                        // Velocity equation: \partial U/ \partial t + U\nabla_{\Gamma} U + (1/\rho)\nabla_{\Gamma} P + cU =0
-                        // U-U block : nonlinear convection+ viscosity term
-                        const double nonlinear_conv = U_old *
-                                                      (fe_v[velocity_extractor].gradient(i, point)[0] *
-                                                       fe_v[velocity_extractor].value(j, point));
+                        // Velocity equation
+                        // U-U block : nonlinear convection + viscosity term
+                        const double nonlinear_conv = -U_old *
+                                                      (fe_v[velocity_extractor].value(j, point) *
+                                                       (b_vec * fe_v[velocity_extractor].gradient(i, point)));
+
                         const double reaction = viscosity_c *
                                                 fe_v[velocity_extractor].value(i, point) *
                                                 fe_v[velocity_extractor].value(j, point);
 
                         copy_data.cell_matrix(i, j) += (nonlinear_conv + reaction) * JxW[point];
 
-                        // U-A block : pressure gradient term  -(1/\rho)\nabla_{\Gamma} P = -(1/\rho)(dP/dA) A \nabla \phi_u
+                        // U-A block : pressure gradient term
 
                         if (A_old > 1e-12) // Avoid division by zero
+
                         {
+                            const double P_old = compute_pressure_value<dim, spacedim>(
+                                A_old, reference_area,
+                                elastic_modulus, reference_pressure);
                             const double dpda = elastic_modulus * 0.5 *
                                                 std::pow(A_old / reference_area, -0.5) / reference_area;
-                            const double pressure_grad = -(1.0 / rho) * dpda *
-                                                         (fe_v[velocity_extractor].gradient(i, point)[0] *
+
+                            const double pressure_grad = -(1.0 / rho) * P_old *
+                                                         (b_vec * fe_v[velocity_extractor].gradient(i, point) *
                                                           fe_v[area_extractor].value(j, point));
                             copy_data.cell_matrix(i, j) += pressure_grad * JxW[point];
                         }
@@ -348,165 +347,172 @@ namespace dealii
                 }
             }
         };
-        // Face worker lambda - handles interior face integrals
+
+        // Face worker lambda ‒ handles interior face integrals
         auto face_worker = [&](const Iterator &cell,
-                               const unsigned int &f,
-                               const unsigned int &sf,
+                               const unsigned int f,
+                               const unsigned int sf,
                                const Iterator &ncell,
-                               const unsigned int &nf,
-                               const unsigned int &nsf,
-                               BloodFlowScratchData<dim, spacedim> &scratch_data,
-                               BloodFlowCopyData &copy_data)
+                               const unsigned int nf,
+                               const unsigned int nsf,
+                               BloodFlowScratchData<dim, spacedim> &scratch,
+                               BloodFlowCopyData &copy)
         {
-            FEInterfaceValues<dim, spacedim> &fe_iv =
-                scratch_data.fe_interface_values;
+            FEInterfaceValues<dim, spacedim> &fe_iv = scratch.fe_interface_values;
             fe_iv.reinit(cell, f, sf, ncell, nf, nsf);
 
-            // Create interface views using extractors - this is the key improvement!
-            const auto &area_interface = fe_iv[area_extractor];
-            const auto &velocity_interface = fe_iv[velocity_extractor];
-
-            copy_data.face_data.emplace_back();
-            BloodFlowCopyDataFace &copy_data_face = copy_data.face_data.back();
-
-            const unsigned int n_dofs = fe_iv.n_current_interface_dofs();
-            copy_data_face.joint_dof_indices = fe_iv.get_interface_dof_indices();
-            copy_data_face.cell_matrix.reinit(n_dofs, n_dofs);
-
             const auto &JxW = fe_iv.get_JxW_values();
-            const auto &normals = fe_iv.get_normal_vectors();
-            const auto &q_points = fe_iv.get_quadrature_points();
+            const auto &normals = fe_iv.get_fe_face_values(0).get_normal_vectors();
 
-            // Get old solution values at interface
-            std::vector<double> old_area_values(q_points.size());
-            std::vector<double> old_velocity_values(q_points.size());
+            // Number of quadrature points on this face
+            const unsigned int n_q = fe_iv.get_fe_face_values(0).n_quadrature_points;
 
-            fe_iv.get_fe_face_values(0)[area_extractor].get_function_values(
-                solution_old, old_area_values);
-            fe_iv.get_fe_face_values(0)[velocity_extractor].get_function_values(
-                solution_old, old_velocity_values);
+            // Read old solution on both sides
+            std::vector<double> A_L(n_q), U_L(n_q), A_R(n_q), U_R(n_q);
+            fe_iv.get_fe_face_values(0)[area_extractor]
+                .get_function_values(solution_old, A_L);
+            fe_iv.get_fe_face_values(0)[velocity_extractor]
+                .get_function_values(solution_old, U_L);
+            fe_iv.get_fe_face_values(1)[area_extractor]
+                .get_function_values(solution_old, A_R);
+            fe_iv.get_fe_face_values(1)[velocity_extractor]
+                .get_function_values(solution_old, U_R);
 
-            const double degree = std::max(1.0, static_cast<double>(fe_iv.get_fe().degree));
-            const double extent1 = cell->measure();
-            const double extent2 = ncell->measure();
-            const double penalty = penalty_parameter(degree, extent1, extent2);
+            copy.face_data.emplace_back();
+            auto &face = copy.face_data.back();
+            const unsigned int nd = fe_iv.n_current_interface_dofs();
+            face.joint_dof_indices = fe_iv.get_interface_dof_indices();
+            face.cell_matrix.reinit(nd, nd);
 
-            for (unsigned int q = 0; q < q_points.size(); ++q)
+            for (unsigned int q = 0; q < n_q; ++q)
             {
+                // Compute tangent-aligned b·n
+                const auto normal = normals[q];
                 const auto b_vec = (cell->vertex(1) - cell->vertex(0)) /
                                    cell->vertex(1).distance(cell->vertex(0));
-                const double b_dot_n = b_vec * normals[q];
+                const double b_dot_n = b_vec * normal;
 
-                const double A_old = old_area_values[q];
-                const double U_old = old_velocity_values[q];
+                // Left and right states
+                const double AL = A_L[q], UL = U_L[q];
+                const double AR = A_R[q], UR = U_R[q];
 
-                for (unsigned int i = 0; i < n_dofs; ++i)
+                // Pressures and wave speeds
+                const double PL = compute_pressure_value<dim, spacedim>(
+                    AL, reference_area, elastic_modulus, reference_pressure);
+                const double PR = compute_pressure_value<dim, spacedim>(
+                    AR, reference_area, elastic_modulus, reference_pressure);
+                const double cL = compute_wave_speed<dim, spacedim>(
+                    AL, reference_area, elastic_modulus, rho);
+                const double cR = compute_wave_speed<dim, spacedim>(
+                    AR, reference_area, elastic_modulus, rho);
+
+                // Rusanov penalty
+                const double s1 = std::abs(UL - cL);
+                const double s2 = std::abs(UL + cL);
+                const double s3 = std::abs(UR - cR);
+                const double s4 = std::abs(UR + cR);
+                const double alpha = 0.5 * std::max({s1, s2, s3, s4});
+
+                // Physical fluxes
+                const double FA_L = AL * UL * b_dot_n;
+                const double FA_R = AR * UR * b_dot_n;
+                const double FU_L = (AL * UL * UL + PL) * b_dot_n;
+                const double FU_R = (AR * UR * UR + PR) * b_dot_n;
+
+                // Local Lax-Friedrichs Fluxes (Rusanov Fluxes)
+                const double flux_A = 0.5 * (FA_L + FA_R) - alpha * (AR - AL);
+                const double flux_U = 0.5 * (FU_L + FU_R) - alpha * (AR * UR - AL * UL);
+
+                for (unsigned int i = 0; i < nd; ++i)
                 {
-                    for (unsigned int j = 0; j < n_dofs; ++j)
+                    for (unsigned int j = 0; j < nd; ++j)
                     {
-                        // DG terms for area equation: -A_old * b\cdot n {U} [\phi_A] + penalty[A][\phi_A]
-                        copy_data_face.cell_matrix(i, j) +=
-                            (-A_old * b_dot_n *
-                                 area_interface.average_of_values(j, q) *
-                                 area_interface.jump_in_values(i, q) +
-                             penalty * theta *
-                                 area_interface.jump_in_values(j, q) *
-                                 area_interface.jump_in_values(i, q)) *
-                            JxW[q];
+                        face.cell_matrix(i, j) +=
+                            flux_A * fe_iv[area_extractor].jump_in_values(i, q) * fe_iv[area_extractor].jump_in_values(j, q) * JxW[q];
 
-                        // DG terms for velocity equation: -U_old * b\cdot n {\phi_U} [U] + penalty[U][\phi_U]
-                        copy_data_face.cell_matrix(i, j) +=
-                            (-U_old * b_dot_n *
-                                 velocity_interface.average_of_values(i, q) *
-                                 velocity_interface.jump_in_values(j, q) +
-                             penalty * theta *
-                                 velocity_interface.jump_in_values(j, q) *
-                                 velocity_interface.jump_in_values(i, q)) *
-                            JxW[q];
+                        face.cell_matrix(i, j) +=
+                            flux_U * fe_iv[velocity_extractor].jump_in_values(i, q) * fe_iv[velocity_extractor].jump_in_values(j, q) * JxW[q];
                     }
                 }
             }
         };
 
+        // Boundary worker lambda ‒ handles boundary face integrals
         typename BloodFlowSystem<dim, spacedim>::ExactSolution exact_solution;
         exact_solution.set_time(time);
-        // Boundary worker lambda - handles boundary face integrals
+
         auto boundary_worker = [&](const Iterator &cell,
-                                   const unsigned int &face_no,
-                                   BloodFlowScratchData<dim, spacedim> &scratch_data,
-                                   BloodFlowCopyData &copy_data)
+                                   const unsigned int face_no,
+                                   BloodFlowScratchData<dim, spacedim> &scratch,
+                                   BloodFlowCopyData &copy)
         {
-            scratch_data.fe_interface_values.reinit(cell, face_no);
-            const FEFaceValuesBase<dim, spacedim> &fe_face =
-                scratch_data.fe_interface_values.get_fe_face_values(0);
+            scratch.fe_interface_values.reinit(cell, face_no);
+            const auto &fe_face = scratch.fe_interface_values.get_fe_face_values(0);
 
-            // Create face views using extractors
-            const auto &area_face = fe_face[area_extractor];
-            const auto &velocity_face = fe_face[velocity_extractor];
-
-            const auto &q_points = fe_face.get_quadrature_points();
             const auto &JxW = fe_face.get_JxW_values();
             const auto &normals = fe_face.get_normal_vectors();
 
-            // Extract boundary data from exact solution
-            std::vector<Vector<double>> g_values(q_points.size(), Vector<double>(2));
-            exact_solution.vector_value_list(q_points, g_values);
+            const unsigned int n_q = fe_face.n_quadrature_points;
 
-            const double degree = std::max(1.0, static_cast<double>(fe_face.get_fe().degree));
-            const double extent1 = cell->measure(); // Fixed to call measure() as a function
-            const double penalty = penalty_parameter(degree, extent1, extent1);
+            // Interior trace
+            std::vector<double> A_in(n_q), U_in(n_q);
+            fe_face[area_extractor]
+                .get_function_values(solution_old, A_in);
+            fe_face[velocity_extractor]
+                .get_function_values(solution_old, U_in);
 
-            for (unsigned int point = 0; point < q_points.size(); ++point)
+            // Dirichlet data from exact_solution
+            std::vector<Vector<double>> bc_vals(n_q, Vector<double>(2));
+            exact_solution.vector_value_list(fe_face.get_quadrature_points(), bc_vals);
+
+            // Reinit local matrix
+            copy.cell_matrix.reinit(fe_face.get_fe().dofs_per_cell,
+                                    fe_face.get_fe().dofs_per_cell);
+
+            for (unsigned int q = 0; q < n_q; ++q)
             {
-                const auto b_vec = (cell->vertex(1) - cell->vertex(0)) /
-                                   cell->vertex(1).distance(cell->vertex(0));
-                const double b_dot_n = b_vec * normals[point];
+                const double b_dot_n = normals[q] *
+                                       ((cell->vertex(1) - cell->vertex(0)) /
+                                        cell->vertex(1).distance(cell->vertex(0)));
 
-                // Extract boundary values at this quadrature point
-                const double area_bc_data = g_values[point](0);     // A from exact solution
-                const double velocity_bc_data = g_values[point](1); // U from exact solution
+                // Interior and prescribed states
+                const double AL = A_in[q], UL = U_in[q];
+                const double AR = bc_vals[q](0), UR = bc_vals[q](1);
 
-                if (b_dot_n < 0) // Inflow boundary
+                // Pressure and wave speeds
+                const double PL = compute_pressure_value<dim, spacedim>(
+                    AL, reference_area, elastic_modulus, reference_pressure);
+                const double PR = compute_pressure_value<dim, spacedim>(
+                    AR, reference_area, elastic_modulus, reference_pressure);
+                const double cL = compute_wave_speed<dim, spacedim>(
+                    AL, reference_area, elastic_modulus, rho);
+                const double cR = compute_wave_speed<dim, spacedim>(
+                    AR, reference_area, elastic_modulus, rho);
+
+                // Rusanov penalty
+                const double s1 = std::abs(UL - cL);
+                const double s2 = std::abs(UL + cL);
+                const double s3 = std::abs(UR - cR);
+                const double s4 = std::abs(UR + cR);
+                const double alpha = 0.5 * std::max({s1, s2, s3, s4});
+
+                // Physical fluxes
+                const double FA_L = AL * UL * b_dot_n;
+                const double FA_R = AR * UR * b_dot_n;
+                const double FU_L = (AL * UL * UL + PL) * b_dot_n;
+                const double FU_R = (AR * UR * UR + PR) * b_dot_n;
+
+                // Rusanov flux
+                const double flux_A = 0.5 * (FA_L + FA_R) - alpha * (AR - AL);
+                const double flux_U = 0.5 * (FU_L + FU_R) - alpha * (AR * UR - AL * UL);
+
+                // Assemble boundary‐face matrix
+                for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
                 {
-                    for (unsigned int i = 0; i < fe_face.get_fe().n_dofs_per_cell(); ++i)
+                    for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
                     {
-                        for (unsigned int j = 0; j < fe_face.get_fe().n_dofs_per_cell(); ++j)
-                        {
-                            // Boundary stabilization
-                            copy_data.cell_matrix(i, j) +=
-                                theta * penalty * std::abs(b_dot_n) *
-                                (area_face.value(i, point) * area_face.value(j, point) +
-                                 velocity_face.value(i, point) * velocity_face.value(j, point)) *
-                                JxW[point];
-                        }
-
-                        // RHS terms with these using exact solution data:
-                        copy_data.cell_rhs(i) +=
-                            (
-                                // Penalty enforcement: \theta*\sigma*|b·n|* boundary_data·\phi for both area and velocity
-                                theta * penalty * std::abs(b_dot_n) *
-                                    (area_bc_data * area_face.value(i, point) +
-                                     velocity_bc_data * velocity_face.value(i, point))
-
-                                // Consistency terms
-                                // For area equation: weak enforcement of AU flux
-                                - area_bc_data * velocity_bc_data * b_dot_n * area_face.value(i, point)
-
-                                // For velocity equation: weak enforcement of momentum flux
-                                - velocity_bc_data * velocity_bc_data * b_dot_n * velocity_face.value(i, point)
-
-                                    ) *
-                            JxW[point];
-
-                        // // Boundary conditions
-                        // const double area_bc = reference_area;
-                        // const double velocity_bc = 0.0;
-
-                        // copy_data.cell_rhs(i) +=
-                        //     -theta * penalty * std::abs(b_dot_n) *
-                        //     (area_bc * area_face.value(i, point) +
-                        //      velocity_bc * velocity_face.value(i, point)) *
-                        //     JxW[point];
+                        copy.cell_matrix(i, j) +=
+                            flux_A * fe_face[area_extractor].value(i, q) * fe_face[area_extractor].value(j, q) * JxW[q] + flux_U * fe_face[velocity_extractor].value(i, q) * fe_face[velocity_extractor].value(j, q) * JxW[q];
                     }
                 }
             }
@@ -622,10 +628,10 @@ namespace dealii
                 {
                     const double area = solution[dof_indices[i]];
                     pressure[dof_indices[i]] =
-                        dealii::compute_pressure<dim, spacedim>(area,
-                                                                reference_area,
-                                                                elastic_modulus,
-                                                                reference_pressure);
+                        compute_pressure_value<dim, spacedim>(area,
+                                                              reference_area,
+                                                              elastic_modulus,
+                                                              reference_pressure);
                 }
             }
         }
@@ -634,11 +640,11 @@ namespace dealii
     template <int dim, int spacedim>
     void BloodFlowSystem<dim, spacedim>::run()
     {
-        // 1. Build initial mesh
+        // Build initial mesh
         GridGenerator::hyper_cube(triangulation);
         triangulation.refine_global(n_global_refinements);
 
-        // 2. Setup FE system
+        // Setup FE system
         setup_system();
         std::cout << "  Number of degrees of freedom: " << dof_handler.n_dofs()
                   << std::endl;
@@ -647,50 +653,12 @@ namespace dealii
 
         exact_solution.set_time(0.0);
 
-        // 3. Assemble mass matrix
+        // Assemble mass matrix
         assemble_mass_matrix();
-
-        // 4. Set initial conditions
-        // const std::string vars = (spacedim == 1 ? "x" : spacedim == 2 ? "x,y"
-        //                                                               : "x,y,z");
 
         // Project initial conditions
         AffineConstraints<double> constraints;
         constraints.close();
-
-        // // Create combined initial condition function
-        // std::vector<std::string> expressions(2);
-        // expressions[0] = initial_A_expression;
-        // expressions[1] = initial_U_expression;
-
-        // // Create a simple vector function for initial conditions
-        // class InitialCondition : public Function<spacedim>
-        // {
-        // public:
-        //     InitialCondition()
-        //         : Function<spacedim>(2)
-        //     {
-        //     } // 2 components
-
-        //     virtual double
-        //     value(const Point<spacedim> & /*p*/,
-        //           const unsigned int component = 0) const override
-
-        //     {
-        //         if (component == 0) // Area
-        //             return 1.0;     // or parse initial_A_expression
-        //         else                // Velocity
-        //             return 0.0;     // or parse initial_U_expression
-        //     }
-        // };
-
-        // InitialCondition initial_condition;
-
-        // VectorTools::project(dof_handler,
-        //                      constraints,
-        //                      QGauss<dim>(fe->tensor_degree() + 1),
-        //                      initial_condition,
-        //                      solution);
 
         VectorTools::project(dof_handler,
                              constraints,
