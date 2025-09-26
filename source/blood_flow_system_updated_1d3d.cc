@@ -328,13 +328,13 @@ namespace dealii
                         if (A_old > 1e-12) // Avoid division by zero
 
                         {
-                            const double P_old = compute_pressure_value<dim, spacedim>(
-                                A_old, reference_area,
-                                elastic_modulus, reference_pressure);
+                            // const double P_old = compute_pressure_value<dim, spacedim>(
+                            //     A_old, reference_area,
+                            //     elastic_modulus, reference_pressure);
                             const double dpda = elastic_modulus * 0.5 *
                                                 std::pow(A_old / reference_area, -0.5) / reference_area;
 
-                            const double pressure_grad = -(1.0 / rho) * P_old *
+                            const double pressure_grad = -(1.0 / rho) * dpda *
                                                          (b_vec * fe_v[velocity_extractor].gradient(i, point) *
                                                           fe_v[area_extractor].value(j, point));
                             copy_data.cell_matrix(i, j) += pressure_grad * JxW[point];
@@ -500,21 +500,54 @@ namespace dealii
                 const double FA_L = AL * UL * b_dot_n;
                 const double FA_R = AR * UR * b_dot_n;
                 const double FU_L = (AL * UL * UL + PL) * b_dot_n;
-                const double FU_R = (AR * UR * UR + PR) * b_dot_n;
+                const double FU_R = (UL * UR * UR + PR) * b_dot_n;
 
                 // Rusanov flux
-                const double flux_A = 0.5 * (FA_L + FA_R) - alpha * (AR - AL);
+                const double flux_A = 0.5 * (FA_R + FA_L) - alpha * (AR + AL);
+                const double flux_A_matrix = 0.5 * FA_R - alpha * AR;
+                const double flux_A_rhs = 0.5 * FA_L + alpha * AR;
                 const double flux_U = 0.5 * (FU_L + FU_R) - alpha * (AR * UR - AL * UL);
+                const double flux_U_matrix = 0.5 * (FU_L)-alpha * (AR * UR);
+                const double flux_U_rhs = 0.5 * FU_L + alpha * AL * UL;
 
-                // Assemble boundary‐face matrix
-                for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+                // charactieristc values
+
+                // const double lambda1 = UL * b_dot_n + cL;
+                const double lambda2 = UL * b_dot_n - cL;
+
+                if (lambda2 < 0)
                 {
-                    for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
+                    for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
                     {
-                        copy.cell_matrix(i, j) +=
-                            flux_A * fe_face[area_extractor].value(i, q) * fe_face[area_extractor].value(j, q) * JxW[q] + flux_U * fe_face[velocity_extractor].value(i, q) * fe_face[velocity_extractor].value(j, q) * JxW[q];
+                        // for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
+                        // {
+                        //     copy.cell_matrix(i, j) +=
+                        //         FA_R * fe_face[area_extractor].value(j, q) * JxW[q] + FU_R * fe_face[velocity_extractor].value(j, q) * JxW[q];
+                        // }
+                        copy.cell_rhs(i) += -(FA_R * fe_face[area_extractor].value(i, q) + FU_R * fe_face[velocity_extractor].value(i, q)) * JxW[q];
                     }
                 }
+                else if (lambda2 > 0)
+                {
+                    for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+                    {
+                        copy.cell_rhs(i) += -(FA_L * fe_face[area_extractor].value(i, q) + FU_L * fe_face[velocity_extractor].value(i, q)) * JxW[q];
+                    }
+                }
+                else
+                {
+                    for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+                    {
+                        // for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
+                        // {
+                        //     copy.cell_matrix(i, j) +=
+                        //         flux_A_matrix * fe_face[area_extractor].value(j, q) * JxW[q] + flux_U_matrix * fe_face[velocity_extractor].value(j, q) * JxW[q];
+                        // }
+
+                        copy.cell_rhs(i) += -(flux_A * fe_face[area_extractor].value(i, q) + flux_U * fe_face[velocity_extractor].value(i, q)) * JxW[q];
+                    }
+                }
+                // Assemble boundary‐face matrix
             }
         };
 
@@ -720,7 +753,7 @@ namespace dealii
             }
             else
             {
-                SolverControl solver_control(1000, 1e-12);
+                SolverControl solver_control(1000, 1e-14);
                 SolverCG<> cg(solver_control);
 
                 PreconditionSSOR<> preconditioner;
