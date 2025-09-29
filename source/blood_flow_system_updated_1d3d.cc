@@ -13,6 +13,7 @@
 #include <deal.II/numerics/vector_tools.h>
 
 #include <algorithm>
+#include <deal.II/numerics/error_estimator.h>
 
 namespace dealii
 {
@@ -305,10 +306,9 @@ namespace dealii
                     {
 
                         // A-U block
-
                         const double b_gradU = b_vec * fe_v[velocity_extractor].gradient(j, point); // removes product error
-                        copy_data.cell_matrix(i, j) -=
-                            fe_v[area_extractor].value(i, point) * A_old *
+                        copy_data.cell_matrix(i, j) +=
+                            -fe_v[area_extractor].value(i, point) * A_old *
                             b_gradU * JxW[point];
 
                         // Velocity equation
@@ -335,8 +335,8 @@ namespace dealii
                                                 std::pow(A_old / reference_area, -0.5) / reference_area;
 
                             const double pressure_grad = -(1.0 / rho) * dpda *
-                                                         (b_vec * fe_v[velocity_extractor].gradient(i, point) *
-                                                          fe_v[area_extractor].value(j, point));
+                                                         (b_vec * fe_v[velocity_extractor].gradient(j, point) *
+                                                          fe_v[area_extractor].value(i, point));
                             copy_data.cell_matrix(i, j) += pressure_grad * JxW[point];
                         }
                     }
@@ -455,19 +455,20 @@ namespace dealii
             const unsigned int n_q = fe_face.n_quadrature_points;
 
             // Interior trace
-            std::vector<double> A_in(n_q), U_in(n_q);
+            std::vector<double> A_L(n_q), U_L(n_q);
             fe_face[area_extractor]
-                .get_function_values(solution_old, A_in);
+                .get_function_values(solution_old, A_L);
             fe_face[velocity_extractor]
-                .get_function_values(solution_old, U_in);
+                .get_function_values(solution_old, U_L);
 
             // Dirichlet data from exact_solution
-            std::vector<Vector<double>> bc_vals(n_q, Vector<double>(2));
-            exact_solution.vector_value_list(fe_face.get_quadrature_points(), bc_vals);
+            std::vector<Vector<double>> bc(n_q, Vector<double>(2));
+            exact_solution.vector_value_list(fe_face.get_quadrature_points(), bc);
 
-            // Reinit local matrix
+            // Reinit local rhs
             copy.cell_matrix.reinit(fe_face.get_fe().dofs_per_cell,
                                     fe_face.get_fe().dofs_per_cell);
+            copy.cell_rhs.reinit(fe_face.get_fe().dofs_per_cell);
 
             for (unsigned int q = 0; q < n_q; ++q)
             {
@@ -476,8 +477,8 @@ namespace dealii
                                         cell->vertex(1).distance(cell->vertex(0)));
 
                 // Interior and prescribed states
-                const double AL = A_in[q], UL = U_in[q];
-                const double AR = bc_vals[q](0), UR = bc_vals[q](1);
+                const double AL = A_L[q], UL = U_L[q];
+                const double AR = bc[q](0), UR = bc[q](1);
 
                 // Pressure and wave speeds
                 const double PL = compute_pressure_value<dim, spacedim>(
@@ -503,19 +504,19 @@ namespace dealii
                 const double FU_R = (UL * UR * UR + PR) * b_dot_n;
 
                 // Rusanov flux
-                const double flux_A = 0.5 * (FA_R + FA_L) - alpha * (AR + AL);
-                const double flux_A_matrix = 0.5 * FA_R - alpha * AR;
-                const double flux_A_rhs = 0.5 * FA_L + alpha * AR;
+                const double flux_A = 0.5 * (FA_R + FA_L) - alpha * (AR - AL);
+                // const double flux_A_matrix = 0.5 * FA_R - alpha * AR;
+                // const double flux_A_rhs = 0.5 * FA_L + alpha * AR;
                 const double flux_U = 0.5 * (FU_L + FU_R) - alpha * (AR * UR - AL * UL);
-                const double flux_U_matrix = 0.5 * (FU_L)-alpha * (AR * UR);
-                const double flux_U_rhs = 0.5 * FU_L + alpha * AL * UL;
+                // const double flux_U_matrix = 0.5 * (FU_L)-alpha * (AR * UR);
+                // const double flux_U_rhs = 0.5 * FU_L + alpha * AL * UL;
 
                 // charactieristc values
 
-                // const double lambda1 = UL * b_dot_n + cL;
+                const double lambda1 = UL * b_dot_n + cL;
                 const double lambda2 = UL * b_dot_n - cL;
 
-                if (lambda2 < 0)
+                if (lambda2 > 0)
                 {
                     for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
                     {
@@ -524,14 +525,14 @@ namespace dealii
                         //     copy.cell_matrix(i, j) +=
                         //         FA_R * fe_face[area_extractor].value(j, q) * JxW[q] + FU_R * fe_face[velocity_extractor].value(j, q) * JxW[q];
                         // }
-                        copy.cell_rhs(i) += -(FA_R * fe_face[area_extractor].value(i, q) + FU_R * fe_face[velocity_extractor].value(i, q)) * JxW[q];
+                        copy.cell_rhs(i) += -(FA_L * fe_face[area_extractor].value(i, q) + FU_L * fe_face[velocity_extractor].value(i, q)) * JxW[q];
                     }
                 }
-                else if (lambda2 > 0)
+                else if (lambda1 < 0)
                 {
                     for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
                     {
-                        copy.cell_rhs(i) += -(FA_L * fe_face[area_extractor].value(i, q) + FU_L * fe_face[velocity_extractor].value(i, q)) * JxW[q];
+                        copy.cell_rhs(i) += -(FA_R * fe_face[area_extractor].value(i, q) + FU_R * fe_face[velocity_extractor].value(i, q)) * JxW[q];
                     }
                 }
                 else
@@ -717,7 +718,6 @@ namespace dealii
             // For implicit time stepping: (M/dt + A) u^{n+1} = M/dt u^n + b
             system_matrix_time.copy_from(mass_matrix);
             system_matrix_time *= (1.0 / time_step);
-            // Note: system_matrix will be assembled at each time step
         }
 
         time = 0.0;
@@ -745,6 +745,7 @@ namespace dealii
             tmp_vector *= (1.0 / time_step);
             tmp_vector += right_hand_side;
 
+            SparseDirectUMFPACK direct;
             // Solve time step
             if (use_direct_solver)
             {
@@ -764,6 +765,338 @@ namespace dealii
             solution_old = solution;
             compute_pressure();
             output_results(step);
+        }
+    }
+
+    template <int dim, int spacedim>
+    double
+    BloodFlowSystem<dim, spacedim>::ExactSolution::value(
+        const Point<spacedim> &p, const unsigned int component) const
+    {
+        // Parameters matching
+        const double r0 = 9.99e-3;
+        const double a0 = numbers::PI * r0 * r0;
+        const double L = 1.0;
+        const double T0 = 1.0;
+        const double atilde = 0.1 * a0;
+        const double qtilde = 0.0;
+
+        const double x = p[0];
+        const double t = this->get_time();
+
+        if (component == 0) // area A
+            return a0 + atilde * std::sin(2.0 * numbers::PI * x / L) *
+                            std::cos(2.0 * numbers::PI * t / T0);
+        else // velocity U
+            return qtilde - (atilde * L / T0) *
+                                std::cos(2.0 * numbers::PI * x / L) *
+                                std::sin(2.0 * numbers::PI * t / T0);
+    }
+
+    template <int dim, int spacedim>
+    void
+    BloodFlowSystem<dim, spacedim>::ExactSolution::vector_value(
+        const Point<spacedim> &p, Vector<double> &values) const
+    {
+        Assert(values.size() == 2, ExcDimensionMismatch(values.size(), 2));
+        values[0] = value(p, 0);
+        values[1] = value(p, 1);
+    }
+
+    template <int dim, int spacedim>
+    Tensor<1, spacedim>
+    BloodFlowSystem<dim, spacedim>::ExactSolution::gradient(
+        const Point<spacedim> &p, const unsigned int component) const
+    {
+        // Parameters matching
+        const double r0 = 9.99e-3;
+        const double a0 = numbers::PI * r0 * r0;
+        const double L = 1.0;
+        const double T0 = 1.0;
+        const double atilde = 0.1 * a0;
+        const double qtilde = 0.0;
+
+        const double x = p[0];
+        const double t = this->get_time();
+
+        Tensor<1, spacedim> grad;
+
+        if (component == 0) // area A gradient
+        {
+            // dA/dx = atilde * (2\pi/L) * cos(2\pi x/L) * cos(2\pi t/T0)
+            grad[0] = atilde * (2.0 * numbers::PI / L) *
+                      std::cos(2.0 * numbers::PI * x / L) *
+                      std::cos(2.0 * numbers::PI * t / T0);
+        }
+        else if (component == 1) // velocity U gradient
+        {
+            // dU/dx = (atilde * L / T0) * (2\pi /L) * sin(2\pi x/L) * sin(2\pi t/T0)
+            grad[0] = (atilde * L / T0) * (2.0 * numbers::PI / L) *
+                      std::sin(2.0 * numbers::PI * x / L) *
+                      std::sin(2.0 * numbers::PI * t / T0);
+        }
+
+        return grad;
+    }
+
+    template <int dim, int spacedim>
+    void
+    BloodFlowSystem<dim, spacedim>::ExactSolution::vector_gradient(
+        const Point<spacedim> &p,
+        std::vector<Tensor<1, spacedim>> &gradients) const
+    {
+        Assert(gradients.size() == 2, ExcDimensionMismatch(gradients.size(), 2));
+
+        gradients[0] = gradient(p, 0); // Area gradient
+        gradients[1] = gradient(p, 1); // Velocity gradient
+    }
+
+    template <int dim, int spacedim>
+    void
+    BloodFlowSystem<dim, spacedim>::ExactSolution::vector_value_list(
+        const std::vector<Point<spacedim>> &points,
+        std::vector<Vector<double>> &value_list) const
+    {
+        const unsigned int n = points.size();
+        Assert(value_list.size() == n, ExcDimensionMismatch(value_list.size(), n));
+        for (unsigned int i = 0; i < n; ++i)
+            vector_value(points[i], value_list[i]);
+    }
+
+    template <int dim, int spacedim>
+    void
+    BloodFlowSystem<dim, spacedim>::compute_errors(unsigned int k)
+    {
+        // Component selectors for area (0) and velocity (1)
+        const ComponentSelectFunction<spacedim> area_mask(0, 1.0, 2);
+        const ComponentSelectFunction<spacedim> velocity_mask(1, 1.0, 2);
+
+        Vector<float> difference_per_cell(triangulation.n_active_cells());
+
+        // Create exact solution at current time
+        typename BloodFlowSystem<dim, spacedim>::ExactSolution exact_solution;
+        exact_solution.set_time(time);
+
+        // Area L2 error
+        VectorTools::integrate_difference(dof_handler,
+                                          solution,
+                                          exact_solution,
+                                          difference_per_cell,
+                                          QGauss<dim>(fe_degree + 3),
+                                          VectorTools::L2_norm,
+                                          &area_mask);
+        const double Area_L2_error =
+            VectorTools::compute_global_error(triangulation,
+                                              difference_per_cell,
+                                              VectorTools::L2_norm);
+
+        // Area H1 error
+        VectorTools::integrate_difference(dof_handler,
+                                          solution,
+                                          exact_solution,
+                                          difference_per_cell,
+                                          QGauss<dim>(fe_degree + 3),
+                                          VectorTools::H1_seminorm,
+                                          &area_mask);
+        const double Area_H1_error =
+            VectorTools::compute_global_error(triangulation,
+                                              difference_per_cell,
+                                              VectorTools::H1_seminorm);
+
+        // Velocity L2 error
+        VectorTools::integrate_difference(dof_handler,
+                                          solution,
+                                          exact_solution,
+                                          difference_per_cell,
+                                          QGauss<dim>(fe_degree + 3),
+                                          VectorTools::L2_norm,
+                                          &velocity_mask);
+        const double Velocity_L2_error =
+            VectorTools::compute_global_error(triangulation,
+                                              difference_per_cell,
+                                              VectorTools::L2_norm);
+
+        // Velocity H1 error
+        VectorTools::integrate_difference(dof_handler,
+                                          solution,
+                                          exact_solution,
+                                          difference_per_cell,
+                                          QGauss<dim>(fe_degree + 3),
+                                          VectorTools::H1_seminorm,
+                                          &velocity_mask);
+        const double Velocity_H1_error =
+            VectorTools::compute_global_error(triangulation,
+                                              difference_per_cell,
+                                              VectorTools::H1_seminorm);
+
+        // Combined system L2 error
+        VectorTools::integrate_difference(dof_handler,
+                                          solution,
+                                          exact_solution,
+                                          difference_per_cell,
+                                          QGauss<dim>(fe_degree + 3),
+                                          VectorTools::L2_norm);
+        const double System_L2_error =
+            VectorTools::compute_global_error(triangulation,
+                                              difference_per_cell,
+                                              VectorTools::L2_norm);
+
+        // Combined system H1 error
+        VectorTools::integrate_difference(dof_handler,
+                                          solution,
+                                          exact_solution,
+                                          difference_per_cell,
+                                          QGauss<dim>(fe_degree + 3),
+                                          VectorTools::H1_seminorm);
+        const double System_H1_error =
+            VectorTools::compute_global_error(triangulation,
+                                              difference_per_cell,
+                                              VectorTools::H1_seminorm);
+
+        // Static variables to store previous errors for convergence rate calculation
+        static double last_Area_L2_error = 0;
+        static double last_Area_H1_error = 0;
+        static double last_Velocity_L2_error = 0;
+        static double last_Velocity_H1_error = 0;
+        static double last_System_L2_error = 0;
+        static double last_System_H1_error = 0;
+
+        // Output results with convergence rates
+        std::cout << std::fixed << std::setprecision(6);
+        std::cout << "=== Error Analysis at Time t = " << time
+                  << " (Refinement Level " << k + 1 << ") ===" << std::endl;
+
+        std::cout << " Area L2 error:      " << std::setw(12) << Area_L2_error
+                  << "   Conv_rate: " << std::setw(6)
+                  << (k == 0 ? 0.0 : std::log(last_Area_L2_error / Area_L2_error) / std::log(2.0))
+                  << std::endl;
+
+        std::cout << " Area H1 error:      " << std::setw(12) << Area_H1_error
+                  << "   Conv_rate: " << std::setw(6)
+                  << (k == 0 ? 0.0 : std::log(last_Area_H1_error / Area_H1_error) / std::log(2.0))
+                  << std::endl;
+
+        std::cout << " Velocity L2 error:  " << std::setw(12) << Velocity_L2_error
+                  << "   Conv_rate: " << std::setw(6)
+                  << (k == 0 ? 0.0 : std::log(last_Velocity_L2_error / Velocity_L2_error) / std::log(2.0))
+                  << std::endl;
+
+        std::cout << " Velocity H1 error:  " << std::setw(12) << Velocity_H1_error
+                  << "   Conv_rate: " << std::setw(6)
+                  << (k == 0 ? 0.0 : std::log(last_Velocity_H1_error / Velocity_H1_error) / std::log(2.0))
+                  << std::endl;
+
+        std::cout << " System L2 error:    " << std::setw(12) << System_L2_error
+                  << "   Conv_rate: " << std::setw(6)
+                  << (k == 0 ? 0.0 : std::log(last_System_L2_error / System_L2_error) / std::log(2.0))
+                  << std::endl;
+
+        std::cout << " System H1 error:    " << std::setw(12) << System_H1_error
+                  << "   Conv_rate: " << std::setw(6)
+                  << (k == 0 ? 0.0 : std::log(last_System_H1_error / System_H1_error) / std::log(2.0))
+                  << std::endl;
+
+        std::cout << " DoFs: " << dof_handler.n_dofs()
+                  << "   h ≈ " << std::sqrt(1.0 / triangulation.n_active_cells()) << std::endl;
+        std::cout << std::string(70, '=') << std::endl;
+
+        // Update previous error values
+        last_Area_L2_error = Area_L2_error;
+        last_Area_H1_error = Area_H1_error;
+        last_Velocity_L2_error = Velocity_L2_error;
+        last_Velocity_H1_error = Velocity_H1_error;
+        last_System_L2_error = System_L2_error;
+        last_System_H1_error = System_H1_error;
+    }
+
+    template <int dim, int spacedim>
+    void
+    BloodFlowSystem<dim, spacedim>::run_convergence_study()
+    {
+        std::cout << "=== CONVERGENCE STUDY for DG" << fe_degree << " ===" << std::endl;
+
+        for (unsigned int cycle = 0; cycle < n_refinement_cycles; ++cycle)
+        {
+            std::cout << "\n--- Refinement Cycle " << cycle << " ---" << std::endl;
+
+            if (cycle == 0)
+            {
+                GridGenerator::hyper_cube(triangulation);
+                triangulation.refine_global(n_global_refinements);
+            }
+            else
+            {
+                triangulation.refine_global(1);
+            }
+
+            setup_system();
+
+            typename BloodFlowSystem<dim, spacedim>::ExactSolution exact_solution;
+            exact_solution.set_time(0.0);
+
+            // Project initial conditions
+            AffineConstraints<double> constraints;
+            constraints.close();
+            VectorTools::project(dof_handler, constraints,
+                                 QGauss<dim>(fe_degree + 1),
+                                 exact_solution, solution);
+            solution_old = solution;
+
+            // Run time stepping to final_time
+            time = 0.0;
+            assemble_mass_matrix();
+
+            // Time loop
+
+            n_time_steps =
+                static_cast<unsigned int>(std::round(final_time / time_step));
+            system_matrix_time.reinit(sparsity_pattern);
+            tmp_vector.reinit(dof_handler.n_dofs());
+            for (unsigned int step = 1; step <= n_time_steps; ++step)
+            {
+                time += time_step;
+                // update bc time in functions
+                exact_solution.set_time(time);
+
+                std::cout << "Step " << step << "  t=" << time << std::endl;
+
+                // Assemble system matrix (depends on solution_old for semi-implicit
+                // terms)
+                assemble_system();
+
+                // Form time-stepping system matrix: M/dt + A
+                system_matrix_time.copy_from(system_matrix);
+                system_matrix_time.add(1.0 / time_step, mass_matrix);
+
+                // Form right-hand side: M/dt * u_old + right_hand
+                mass_matrix.vmult(tmp_vector, solution_old);
+
+                tmp_vector *= (1.0 / time_step);
+                tmp_vector += right_hand_side;
+
+                SparseDirectUMFPACK direct;
+                // Solve time step
+                if (use_direct_solver)
+                {
+                    direct.initialize(system_matrix_time);
+                    direct.vmult(solution, tmp_vector);
+                }
+                else
+                {
+                    SolverControl solver_control(1000, 1e-14);
+                    SolverCG<> cg(solver_control);
+
+                    PreconditionSSOR<> preconditioner;
+                    preconditioner.initialize(system_matrix_time, 1.0);
+                    cg.solve(system_matrix_time, solution, tmp_vector, preconditioner);
+                }
+
+                solution_old = solution;
+                compute_pressure();
+                output_results(step);
+            }
+            // Now compute errors at final time
+            compute_errors(cycle);
         }
     }
 
