@@ -1,6 +1,5 @@
 /* --------------------------------------------------------------------------
  */
-
 #include "../include/blood_flow_system_updated_1d3d.h"
 
 #include <deal.II/base/function_parser.h>
@@ -13,11 +12,12 @@
 #include <deal.II/numerics/vector_tools.h>
 
 #include <algorithm>
+
+#include <iomanip>
 #include <deal.II/numerics/error_estimator.h>
 
 namespace dealii
 {
-
     // Physical parameters and constitutive relations
     template <int dim, int spacedim>
     double
@@ -131,7 +131,9 @@ namespace dealii
         add_parameter("Elastic modulus", elastic_modulus);
         add_parameter("Reference pressure", reference_pressure);
         add_parameter("Theta (penalty parameter)", theta);
-        add_parameter("Right hand side expression", rhs_expression);
+        add_parameter("Eta (stability parameter)", eta);
+        // add_parameter("Right hand side A expression", rhs_A_expression);
+        // add_parameter("Right hand side U expression", rhs_U_expression);
         add_parameter("Initial condition A expression", initial_A_expression);
         add_parameter("Initial condition U expression", initial_U_expression);
         add_parameter("Pressure boundary expression", pressure_bc_expression);
@@ -146,6 +148,66 @@ namespace dealii
                                       ParameterHandler::Short);
     }
 
+    template <int spacedim>
+    class RHS_A : public Function<spacedim>
+    {
+    public:
+        RHS_A()
+            : Function<spacedim>(1)
+        {
+        }
+
+        virtual double
+        value(const Point<spacedim> &p,
+              const unsigned int /*component*/ = 0) const override
+        {
+            const double r0 = 9.99e-3;
+            const double a0 = numbers::PI * r0 * r0;
+            const double L = 1.0;
+            const double T0 = 1.0;
+            const double atilde = 0.1 * a0;
+            const double qtilde = 0.0;
+            const double x = p[0];
+            const double t = this->get_time();
+
+            // forcing term from manufactured solution
+            return std::sin(2.0 * numbers::PI * x / L) * std::sin(2.0 * numbers::PI * t / T0) *
+                       (-2.0 * numbers::PI / T0 * atilde + (a0 + atilde * std::sin(2.0 * numbers::PI * x / L) * std::cos(2.0 * numbers::PI * t / T0)) * 2.0 * numbers::PI / T0 * atilde) +
+                   atilde * std::cos(2.0 * numbers::PI * x / L) * std::cos(2.0 * numbers::PI * t / T0) * (2.0 * numbers::PI / L) * (qtilde - (atilde * L / T0) * std::cos(2.0 * numbers::PI * x / L) * std::sin(2.0 * numbers::PI * t / T0));
+        }
+    };
+
+    // U‐forcing term fᵤ(x,t)
+    template <int spacedim>
+    class RHS_U : public Function<spacedim>
+    {
+    public:
+        RHS_U()
+            : Function<spacedim>(1)
+        {
+        }
+
+        virtual double
+        value(const Point<spacedim> &p,
+              const unsigned int /*component*/ = 0) const override
+        {
+            const double r0 = 9.99e-3;
+            const double a0 = numbers::PI * r0 * r0;
+            const double L = 1.0;
+            const double T0 = 1.0;
+            const double atilde = 0.1 * a0;
+            const double rho = 1.06;
+            const double elastic_modulus = 1.0;
+            const double viscosity_c = 1.0;
+            const double m = 0.5;
+            const double x = p[0];
+            const double t = this->get_time();
+            const double A = a0 + atilde * std::sin(2.0 * numbers::PI * x / L) * std::cos(2.0 * numbers::PI * t / T0);
+
+            return std::cos(2.0 * numbers::PI * x / L) * std::cos(2.0 * numbers::PI * t / T0) * (-L * L / (T0 * T0) + elastic_modulus / (rho * std::pow(a0, m)) * std::pow(A, m - 1)) + (atilde - (atilde * L / T0) * std::cos(2.0 * numbers::PI * x / L) * std::sin(2.0 * numbers::PI * t / T0)) * ((2.0 * numbers::PI / T0) * atilde * std::sin(2.0 * numbers::PI * x / L) * std::sin(2.0 * numbers::PI * t / T0) + viscosity_c);
+        }
+    };
+
     template <int dim, int spacedim>
     void
     BloodFlowSystem<dim, spacedim>::setup_system()
@@ -156,6 +218,9 @@ namespace dealii
             fe = std::make_unique<FESystem<dim, spacedim>>(
                 FE_DGQ<dim, spacedim>(fe_degree), 2);
 
+            rhs_A_function = std::make_unique<RHS_A<spacedim>>();
+            rhs_U_function = std::make_unique<RHS_U<spacedim>>();
+
             std::string vars;
             if (spacedim == 1)
                 vars = "x";
@@ -163,9 +228,9 @@ namespace dealii
                 vars = "x,y";
             else
                 vars = "x,y,z";
-
             std::map<std::string, double> const_map;
-            rhs.initialize(vars, rhs_expression, const_map);
+            // rhs_A.initialize(vars, rhs_A_expression, const_map);
+            // rhs_U.initialize(vars, rhs_U_expression, const_map);
             initial_A.initialize(vars, initial_A_expression, const_map);
             initial_U.initialize(vars, initial_U_expression, const_map);
             pressure_bc.initialize(vars, pressure_bc_expression, const_map);
@@ -176,7 +241,6 @@ namespace dealii
         DynamicSparsityPattern dsp(dof_handler.n_dofs());
         DoFTools::make_flux_sparsity_pattern(dof_handler, dsp);
         sparsity_pattern.copy_from(dsp);
-
         system_matrix.reinit(sparsity_pattern);
         mass_matrix.reinit(sparsity_pattern);
         solution.reinit(dof_handler.n_dofs());
@@ -258,13 +322,6 @@ namespace dealii
         const FEValuesExtractors::Scalar area_extractor(0);
         const FEValuesExtractors::Scalar velocity_extractor(1);
 
-        auto penalty_parameter = [](const double degree,
-                                    const double extent1,
-                                    const double extent2) -> double
-        {
-            return 4.0 * degree * (degree + 1.0) * 0.5 * (1.0 / extent1 + 1.0 / extent2);
-        };
-
         // Cell worker which handles volume integral terms
 
         auto cell_worker = [&](const Iterator &cell,
@@ -298,7 +355,19 @@ namespace dealii
                     old_velocity_values[point]; // Velocity at previous time
 
                 // To obtain RHS values
-                const double rhs_value = rhs.value(q_points[point]);
+                rhs_A_function->set_time(time);
+                rhs_U_function->set_time(time);
+
+                const double rhs_A_value = rhs_A_function->value(q_points[point]);
+                const double rhs_U_value = rhs_U_function->value(q_points[point]);
+
+                const unsigned int n_q_points = fe_v.n_quadrature_points;
+
+                std::vector<Tensor<1, spacedim>> grad_U_old_values(n_q_points);
+                fe_v[velocity_extractor].get_function_gradients(solution_old, grad_U_old_values);
+
+                // std::vector<Tensor<1, spacedim>> grad_A_old_values(n_q_points);
+                // fe_v[velocity_extractor].get_function_gradients(solution_old, grad_A_old_values);
 
                 for (unsigned int i = 0; i < n_dofs; ++i)
                 {
@@ -307,12 +376,17 @@ namespace dealii
 
                         // A-U block
                         const double b_gradU = b_vec * fe_v[velocity_extractor].gradient(j, point); // removes product error
-                        copy_data.cell_matrix(i, j) +=
-                            -fe_v[area_extractor].value(i, point) * A_old *
+                        copy_data.cell_matrix(i, j) -=
+                            fe_v[area_extractor].value(i, point) * A_old *
                             b_gradU * JxW[point];
 
-                        // Velocity equation
-                        // U-U block : nonlinear convection + viscosity term
+                        // add h ^ { eta }(\nabla u ^ n, \nabla \phi_U)
+                        const double h = std::sqrt(1.0 / triangulation.n_active_cells());
+
+                        copy_data.cell_matrix(i, j) -= std::pow(h, eta) * fe_v[velocity_extractor].gradient(i, point) * fe_v[velocity_extractor].gradient(j, point) * JxW[point];
+                        // copy_data.cell_matrix(i, j) += std::pow(h, eta) * fe_v[area_extractor].gradient(i, point) * fe_v[area_extractor].gradient(j, point) * JxW[point];
+
+                        // Velocity equation U - U block : nonlinear convection + viscosity term
                         const double nonlinear_conv = -U_old *
                                                       (fe_v[velocity_extractor].value(j, point) *
                                                        (b_vec * fe_v[velocity_extractor].gradient(i, point)));
@@ -328,9 +402,6 @@ namespace dealii
                         if (A_old > 1e-12) // Avoid division by zero
 
                         {
-                            // const double P_old = compute_pressure_value<dim, spacedim>(
-                            //     A_old, reference_area,
-                            //     elastic_modulus, reference_pressure);
                             const double dpda = elastic_modulus * 0.5 *
                                                 std::pow(A_old / reference_area, -0.5) / reference_area;
 
@@ -343,7 +414,8 @@ namespace dealii
 
                     // Right-hand side
 
-                    copy_data.cell_rhs(i) += rhs_value * (fe_v[area_extractor].value(i, point) + fe_v[velocity_extractor].value(i, point)) * JxW[point];
+                    copy_data.cell_rhs(i) += rhs_A_value * fe_v[area_extractor].value(i, point) * JxW[point];
+                    copy_data.cell_rhs(i) += rhs_U_value * fe_v[velocity_extractor].value(i, point) * JxW[point];
                 }
             }
         };
@@ -416,22 +488,31 @@ namespace dealii
                 // Physical fluxes
                 const double FA_L = AL * UL * b_dot_n;
                 const double FA_R = AR * UR * b_dot_n;
-                const double FU_L = (AL * UL * UL + PL) * b_dot_n;
-                const double FU_R = (AR * UR * UR + PR) * b_dot_n;
+                const double FU_L = (0.5 * UL * UL + PL / rho) * b_dot_n;
+                const double FU_R = (0.5 * UR * UR + PR / rho) * b_dot_n;
 
                 // Local Lax-Friedrichs Fluxes (Rusanov Fluxes)
-                const double flux_A = 0.5 * (FA_L + FA_R) - alpha * (AR - AL);
-                const double flux_U = 0.5 * (FU_L + FU_R) - alpha * (AR * UR - AL * UL);
+                const double flux_A = (FA_L + FA_R) - alpha * (AR - AL);
+                const double flux_U = (FU_L + FU_R) - alpha * (UR - UL);
+
+                const double h_face = cell->face(f)->measure();
+                const double sigma = theta * std::max(std::abs(cL), std::abs(cR)) / h_face;
 
                 for (unsigned int i = 0; i < nd; ++i)
                 {
                     for (unsigned int j = 0; j < nd; ++j)
                     {
                         face.cell_matrix(i, j) +=
-                            flux_A * fe_iv[area_extractor].jump_in_values(i, q) * fe_iv[area_extractor].jump_in_values(j, q) * JxW[q];
+                            flux_A * fe_iv[area_extractor].jump_in_values(j, q) * JxW[q];
 
                         face.cell_matrix(i, j) +=
-                            flux_U * fe_iv[velocity_extractor].jump_in_values(i, q) * fe_iv[velocity_extractor].jump_in_values(j, q) * JxW[q];
+                            flux_U * fe_iv[velocity_extractor].jump_in_values(j, q) * JxW[q];
+
+                        face.cell_matrix(i, j) +=
+                            sigma * fe_iv[velocity_extractor].jump_in_values(i, q) * fe_iv[velocity_extractor].jump_in_values(j, q) * JxW[q];
+
+                        // face.cell_matrix(i, j) +=
+                        //     sigma * fe_iv[area_extractor].jump_in_values(i, q) * fe_iv[area_extractor].jump_in_values(j, q) * JxW[q];
                     }
                 }
             }
@@ -500,39 +581,37 @@ namespace dealii
                 // Physical fluxes
                 const double FA_L = AL * UL * b_dot_n;
                 const double FA_R = AR * UR * b_dot_n;
-                const double FU_L = (AL * UL * UL + PL) * b_dot_n;
-                const double FU_R = (UL * UR * UR + PR) * b_dot_n;
+                const double FU_L = (0.5 * UL * UL + PL / rho) * b_dot_n;
+                const double FU_R = (0.5 * UR * UR + PR / rho) * b_dot_n;
 
                 // Rusanov flux
-                const double flux_A = 0.5 * (FA_R + FA_L) - alpha * (AR - AL);
-                // const double flux_A_matrix = 0.5 * FA_R - alpha * AR;
-                // const double flux_A_rhs = 0.5 * FA_L + alpha * AR;
-                const double flux_U = 0.5 * (FU_L + FU_R) - alpha * (AR * UR - AL * UL);
-                // const double flux_U_matrix = 0.5 * (FU_L)-alpha * (AR * UR);
-                // const double flux_U_rhs = 0.5 * FU_L + alpha * AL * UL;
+                const double flux_A = (FA_L + FA_R) - alpha * (AR - AL);
+                const double flux_U = (FU_L + FU_R) - alpha * (UR - UL);
+
+                // const double h_face = cell->face(face_no)->measure();
+                // const double sigma = theta * std::max(cL, cR) / h_face;
 
                 // charactieristc values
 
                 const double lambda1 = UL * b_dot_n + cL;
                 const double lambda2 = UL * b_dot_n - cL;
 
-                if (lambda2 > 0)
+                if (lambda1 > 0)
+                {
+                    for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+                    {
+                        copy.cell_rhs(i) += -(FA_R * fe_face[area_extractor].value(i, q) + FU_R * fe_face[velocity_extractor].value(i, q)) * JxW[q];
+                    }
+                }
+                else if (lambda2 < 0)
                 {
                     for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
                     {
                         // for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
                         // {
-                        //     copy.cell_matrix(i, j) +=
-                        //         FA_R * fe_face[area_extractor].value(j, q) * JxW[q] + FU_R * fe_face[velocity_extractor].value(j, q) * JxW[q];
+                        copy.cell_rhs(i) +=
+                            FA_L * fe_face[area_extractor].value(i, q) * JxW[q] + FU_L * fe_face[velocity_extractor].value(i, q) * JxW[q];
                         // }
-                        copy.cell_rhs(i) += -(FA_L * fe_face[area_extractor].value(i, q) + FU_L * fe_face[velocity_extractor].value(i, q)) * JxW[q];
-                    }
-                }
-                else if (lambda1 < 0)
-                {
-                    for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
-                    {
-                        copy.cell_rhs(i) += -(FA_R * fe_face[area_extractor].value(i, q) + FU_R * fe_face[velocity_extractor].value(i, q)) * JxW[q];
                     }
                 }
                 else
@@ -541,14 +620,11 @@ namespace dealii
                     {
                         // for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
                         // {
-                        //     copy.cell_matrix(i, j) +=
-                        //         flux_A_matrix * fe_face[area_extractor].value(j, q) * JxW[q] + flux_U_matrix * fe_face[velocity_extractor].value(j, q) * JxW[q];
+                        copy.cell_rhs(i) +=
+                            flux_A * fe_face[area_extractor].value(i, q) * JxW[q] + flux_U * fe_face[velocity_extractor].value(i, q) * JxW[q];
                         // }
-
-                        copy.cell_rhs(i) += -(flux_A * fe_face[area_extractor].value(i, q) + flux_U * fe_face[velocity_extractor].value(i, q)) * JxW[q];
                     }
                 }
-                // Assemble boundary‐face matrix
             }
         };
 
@@ -671,102 +747,102 @@ namespace dealii
         }
     }
 
-    template <int dim, int spacedim>
-    void BloodFlowSystem<dim, spacedim>::run()
-    {
-        // Build initial mesh
-        GridGenerator::hyper_cube(triangulation);
-        triangulation.refine_global(n_global_refinements);
+    // template <int dim, int spacedim>
+    // void BloodFlowSystem<dim, spacedim>::run()
+    // {
+    //     // Build initial mesh
+    //     GridGenerator::hyper_cube(triangulation);
+    //     triangulation.refine_global(n_global_refinements);
 
-        // Setup FE system
-        setup_system();
-        std::cout << "  Number of degrees of freedom: " << dof_handler.n_dofs()
-                  << std::endl;
+    //     // Setup FE system
+    //     setup_system();
+    //     std::cout << "  Number of degrees of freedom: " << dof_handler.n_dofs()
+    //               << std::endl;
 
-        typename BloodFlowSystem<dim, spacedim>::ExactSolution exact_solution;
+    //     typename BloodFlowSystem<dim, spacedim>::ExactSolution exact_solution;
 
-        exact_solution.set_time(0.0);
+    //     exact_solution.set_time(0.0);
 
-        // Assemble mass matrix
-        assemble_mass_matrix();
+    //     // Assemble mass matrix
+    //     assemble_mass_matrix();
 
-        // Project initial conditions
-        AffineConstraints<double> constraints;
-        constraints.close();
+    //     // Project initial conditions
+    //     AffineConstraints<double> constraints;
+    //     constraints.close();
 
-        VectorTools::project(dof_handler,
-                             constraints,
-                             QGauss<dim>(fe->tensor_degree() + 1),
-                             exact_solution,
-                             solution);
+    //     VectorTools::project(dof_handler,
+    //                          constraints,
+    //                          QGauss<dim>(fe->tensor_degree() + 1),
+    //                          exact_solution,
+    //                          solution);
 
-        solution_old = solution;
-        compute_pressure();
+    //     solution_old = solution;
+    //     compute_pressure();
 
-        // 5. Time loop setup
-        n_time_steps =
-            static_cast<unsigned int>(std::round(final_time / time_step));
-        system_matrix_time.reinit(sparsity_pattern);
-        tmp_vector.reinit(dof_handler.n_dofs());
+    //     // 5. Time loop setup
+    //     n_time_steps =
+    //         static_cast<unsigned int>(std::round(final_time / time_step));
+    //     system_matrix_time.reinit(sparsity_pattern);
+    //     tmp_vector.reinit(dof_handler.n_dofs());
 
-        std::cout << "  Number of time steps: " << n_time_steps
-                  << " with time step size dt=" << time_step << std::endl;
+    //     std::cout << "  Number of time steps: " << n_time_steps
+    //               << " with time step size dt=" << time_step << std::endl;
 
-        SparseDirectUMFPACK direct;
-        if (use_direct_solver)
-        {
-            // For implicit time stepping: (M/dt + A) u^{n+1} = M/dt u^n + b
-            system_matrix_time.copy_from(mass_matrix);
-            system_matrix_time *= (1.0 / time_step);
-        }
+    //     SparseDirectUMFPACK direct;
+    //     if (use_direct_solver)
+    //     {
+    //         // For implicit time stepping: (M/dt + A) u^{n+1} = M/dt u^n + b
+    //         system_matrix_time.copy_from(mass_matrix);
+    //         system_matrix_time *= (1.0 / time_step);
+    //     }
 
-        time = 0.0;
-        output_results(0);
+    //     time = 0.0;
+    //     output_results(0);
 
-        // 6. Time stepping
-        for (unsigned int step = 1; step <= n_time_steps; ++step)
-        {
-            time += time_step;
-            // update bc time in functions
-            exact_solution.set_time(time);
+    //     // 6. Time stepping
+    //     for (unsigned int step = 1; step <= n_time_steps; ++step)
+    //     {
+    //         time += time_step;
+    //         // update bc time in functions
+    //         exact_solution.set_time(time);
 
-            std::cout << "Step " << step << "  t=" << time << std::endl;
+    //         std::cout << "Step " << step << "  t=" << time << std::endl;
 
-            // Assemble system matrix (depends on solution_old for semi-implicit
-            // terms)
-            assemble_system();
+    //         // Assemble system matrix (depends on solution_old for semi-implicit
+    //         // terms)
+    //         assemble_system();
 
-            // Form time-stepping system matrix: M/dt + A
-            system_matrix_time.copy_from(system_matrix);
-            system_matrix_time.add(1.0 / time_step, mass_matrix);
+    //         // Form time-stepping system matrix: M/dt + A
+    //         system_matrix_time.copy_from(system_matrix);
+    //         system_matrix_time.add(1.0 / time_step, mass_matrix);
 
-            // Form right-hand side: M/dt * u_old + right_hand
-            mass_matrix.vmult(tmp_vector, solution_old);
-            tmp_vector *= (1.0 / time_step);
-            tmp_vector += right_hand_side;
+    //         // Form right-hand side: M/dt * u_old + right_hand
+    //         mass_matrix.vmult(tmp_vector, solution_old);
+    //         tmp_vector *= (1.0 / time_step);
+    //         tmp_vector += right_hand_side;
 
-            SparseDirectUMFPACK direct;
-            // Solve time step
-            if (use_direct_solver)
-            {
-                direct.initialize(system_matrix_time);
-                direct.vmult(solution, tmp_vector);
-            }
-            else
-            {
-                SolverControl solver_control(1000, 1e-14);
-                SolverCG<> cg(solver_control);
+    //         SparseDirectUMFPACK direct;
+    //         // Solve time step
+    //         if (use_direct_solver)
+    //         {
+    //             direct.initialize(system_matrix_time);
+    //             direct.vmult(solution, tmp_vector);
+    //         }
+    //         else
+    //         {
+    //             SolverControl solver_control(1000, 1e-14);
+    //             SolverCG<> cg(solver_control);
 
-                PreconditionSSOR<> preconditioner;
-                preconditioner.initialize(system_matrix_time, 1.0);
-                cg.solve(system_matrix_time, solution, tmp_vector, preconditioner);
-            }
+    //             PreconditionSSOR<> preconditioner;
+    //             preconditioner.initialize(system_matrix_time, 1.0);
+    //             cg.solve(system_matrix_time, solution, tmp_vector, preconditioner);
+    //         }
 
-            solution_old = solution;
-            compute_pressure();
-            output_results(step);
-        }
-    }
+    //         solution_old = solution;
+    //         compute_pressure();
+    //         output_results(step);
+    //     }
+    // }
 
     template <int dim, int spacedim>
     double
@@ -794,8 +870,7 @@ namespace dealii
     }
 
     template <int dim, int spacedim>
-    void
-    BloodFlowSystem<dim, spacedim>::ExactSolution::vector_value(
+    void BloodFlowSystem<dim, spacedim>::ExactSolution::vector_value(
         const Point<spacedim> &p, Vector<double> &values) const
     {
         Assert(values.size() == 2, ExcDimensionMismatch(values.size(), 2));
@@ -840,8 +915,7 @@ namespace dealii
     }
 
     template <int dim, int spacedim>
-    void
-    BloodFlowSystem<dim, spacedim>::ExactSolution::vector_gradient(
+    void BloodFlowSystem<dim, spacedim>::ExactSolution::vector_gradient(
         const Point<spacedim> &p,
         std::vector<Tensor<1, spacedim>> &gradients) const
     {
@@ -852,8 +926,7 @@ namespace dealii
     }
 
     template <int dim, int spacedim>
-    void
-    BloodFlowSystem<dim, spacedim>::ExactSolution::vector_value_list(
+    void BloodFlowSystem<dim, spacedim>::ExactSolution::vector_value_list(
         const std::vector<Point<spacedim>> &points,
         std::vector<Vector<double>> &value_list) const
     {
@@ -864,8 +937,7 @@ namespace dealii
     }
 
     template <int dim, int spacedim>
-    void
-    BloodFlowSystem<dim, spacedim>::compute_errors(unsigned int k)
+    void BloodFlowSystem<dim, spacedim>::compute_errors(unsigned int k)
     {
         // Component selectors for area (0) and velocity (1)
         const ComponentSelectFunction<spacedim> area_mask(0, 1.0, 2);
@@ -927,42 +999,17 @@ namespace dealii
         const double Velocity_H1_error =
             VectorTools::compute_global_error(triangulation,
                                               difference_per_cell,
+
                                               VectorTools::H1_seminorm);
 
-        // Combined system L2 error
-        VectorTools::integrate_difference(dof_handler,
-                                          solution,
-                                          exact_solution,
-                                          difference_per_cell,
-                                          QGauss<dim>(fe_degree + 3),
-                                          VectorTools::L2_norm);
-        const double System_L2_error =
-            VectorTools::compute_global_error(triangulation,
-                                              difference_per_cell,
-                                              VectorTools::L2_norm);
-
-        // Combined system H1 error
-        VectorTools::integrate_difference(dof_handler,
-                                          solution,
-                                          exact_solution,
-                                          difference_per_cell,
-                                          QGauss<dim>(fe_degree + 3),
-                                          VectorTools::H1_seminorm);
-        const double System_H1_error =
-            VectorTools::compute_global_error(triangulation,
-                                              difference_per_cell,
-                                              VectorTools::H1_seminorm);
-
-        // Static variables to store previous errors for convergence rate calculation
+        // variables to store previous errors for convergence rate calculation
         static double last_Area_L2_error = 0;
         static double last_Area_H1_error = 0;
         static double last_Velocity_L2_error = 0;
         static double last_Velocity_H1_error = 0;
-        static double last_System_L2_error = 0;
-        static double last_System_H1_error = 0;
 
         // Output results with convergence rates
-        std::cout << std::fixed << std::setprecision(6);
+        std::cout << std::scientific << std::setprecision(3);
         std::cout << "=== Error Analysis at Time t = " << time
                   << " (Refinement Level " << k + 1 << ") ===" << std::endl;
 
@@ -986,18 +1033,8 @@ namespace dealii
                   << (k == 0 ? 0.0 : std::log(last_Velocity_H1_error / Velocity_H1_error) / std::log(2.0))
                   << std::endl;
 
-        std::cout << " System L2 error:    " << std::setw(12) << System_L2_error
-                  << "   Conv_rate: " << std::setw(6)
-                  << (k == 0 ? 0.0 : std::log(last_System_L2_error / System_L2_error) / std::log(2.0))
-                  << std::endl;
-
-        std::cout << " System H1 error:    " << std::setw(12) << System_H1_error
-                  << "   Conv_rate: " << std::setw(6)
-                  << (k == 0 ? 0.0 : std::log(last_System_H1_error / System_H1_error) / std::log(2.0))
-                  << std::endl;
-
         std::cout << " DoFs: " << dof_handler.n_dofs()
-                  << "   h ≈ " << std::sqrt(1.0 / triangulation.n_active_cells()) << std::endl;
+                  << "   h ≈ " << 1.0 / triangulation.n_active_cells() << std::endl;
         std::cout << std::string(70, '=') << std::endl;
 
         // Update previous error values
@@ -1005,13 +1042,10 @@ namespace dealii
         last_Area_H1_error = Area_H1_error;
         last_Velocity_L2_error = Velocity_L2_error;
         last_Velocity_H1_error = Velocity_H1_error;
-        last_System_L2_error = System_L2_error;
-        last_System_H1_error = System_H1_error;
     }
 
     template <int dim, int spacedim>
-    void
-    BloodFlowSystem<dim, spacedim>::run_convergence_study()
+    void BloodFlowSystem<dim, spacedim>::run_convergence_study()
     {
         std::cout << "=== CONVERGENCE STUDY for DG" << fe_degree << " ===" << std::endl;
 
@@ -1040,6 +1074,7 @@ namespace dealii
             VectorTools::project(dof_handler, constraints,
                                  QGauss<dim>(fe_degree + 1),
                                  exact_solution, solution);
+
             solution_old = solution;
 
             // Run time stepping to final_time
@@ -1090,6 +1125,7 @@ namespace dealii
                     preconditioner.initialize(system_matrix_time, 1.0);
                     cg.solve(system_matrix_time, solution, tmp_vector, preconditioner);
                 }
+                std::cout << "norm of vector " << solution.l2_norm() << std::endl;
 
                 solution_old = solution;
                 compute_pressure();
