@@ -1,7 +1,4 @@
 // ---------------------------------------------------------------------
-//
-//
-//
 // This file is part of the blood_flow_system application, based on
 // the deal.II library.
 //
@@ -70,8 +67,8 @@ namespace dealii
      * @brief Blood flow system solver for Triangulation<1,3>
      *
      * Solves:
-     *   A_t + b · \nabla (AU) = 0
-     *   U_t + U \nabla_\Gamma U + (1/ρ) \nabla_\Gamma P(A) + c U = 0
+     *   A_t + b · \nabla (AU) = f_a
+     *   U_t + U \nabla_\Gamma U + (1/ρ) \nabla_\Gamma P(A) + c U = f_u
      */
 
     template <int dim, int spacedim>
@@ -113,55 +110,31 @@ namespace dealii
             vector_value_list(const std::vector<Point<spacedim>> &points,
                               std::vector<Vector<double>> &value_list) const override;
         };
-        //         // Parameters matching
-        //         const double r0 = 9.99e-3;
-        //         const double a0 = numbers::PI * r0 * r0;
-        //         const double L = 1.0;
-        //         const double T0 = 1.0;
-        //         const double atilde = 0.1 * a0;
-        //         const double qtilde = 0.0;
-
-        //         const double x = p[0];
-        //         const double t = this->get_time();
-
-        //         if (component == 0) // area A
-        //             return a0 + atilde * std::sin(2.0 * numbers::PI * x / L) *
-        //                             std::cos(2.0 * numbers::PI * t / T0);
-        //         else // velocity U
-        //             return qtilde - (atilde * L / T0) *
-        //                                 std::cos(2.0 * numbers::PI * x / L) *
-        //                                 std::sin(2.0 * numbers::PI * t / T0);
-        //     }
-
-        //     virtual void
-        //     vector_value(const Point<spacedim> &p, Vector<double> &values) const override
-        //     {
-        //         Assert(values.size() == 2, ExcDimensionMismatch(values.size(), 2));
-        //         values[0] = value(p, 0);
-        //         values[1] = value(p, 1);
-        //     }
-
-        //     virtual void
-        //     vector_value_list(const std::vector<Point<spacedim>> &points,
-        //                       std::vector<Vector<double>> &value_list) const override
-        //     {
-        //         const unsigned int n = points.size();
-        //         Assert(value_list.size() == n, ExcDimensionMismatch(value_list.size(), n));
-        //         for (unsigned int i = 0; i < n; ++i)
-        //             vector_value(points[i], value_list[i]);
-        //     }
-        // };
 
         // Declare all necessary objects
         Triangulation<dim, spacedim> triangulation;
 
         DoFHandler<dim, spacedim> dof_handler;
         std::unique_ptr<FESystem<dim, spacedim>> fe;
-        // Parameters exposed via add_parameter()
+
+        // Parameters
+        const double r0 = 9.99e-3;
+        const double a0 = numbers::PI * r0 * r0;
+        const double T0 = 1.0;
+        double rho = 1.06;
+        double viscosity_c = 1.0;
+        double reference_area = 0.1 * a0;
+        double elastic_modulus = 1.0;
+        double reference_pressure = 9.4666666;
+        double theta = 0.5;
+        double eta = 2;
+        double L = 1.0;
+
         unsigned int fe_degree = 1;
         std::vector<double> constants;
-        std::string rhs_expression = "0.0";
-        std::string initial_A_expression = "a0 + atilde * std::sin(2.0 * numbers::PI * x / L)";
+        std::string initial_A_expression =
+            "a0 + atilde * std::sin(2.0 * numbers::PI * x / L)";
+
         std::string initial_U_expression = "0.0";
         std::string pressure_bc_expression = "0.0";
         bool use_direct_solver = true;
@@ -208,25 +181,15 @@ namespace dealii
         // `FunctionParser<dim>` objects
         FunctionParser<spacedim> initial_A;
         FunctionParser<spacedim> initial_U;
-        FunctionParser<spacedim> rhs;
         FunctionParser<spacedim> pressure_bc;
         FunctionParser<spacedim> advection_coeff;
+        std::unique_ptr<Function<spacedim>> rhs_A_function;
+        std::unique_ptr<Function<spacedim>> rhs_U_function;
 
         // Time stepping
         double time_step;
         double time;
         unsigned int n_time_steps;
-
-        // Parameters
-        const double r0 = 9.99e-3;
-        const double a0 = numbers::PI * r0 * r0;
-
-        double rho = 1.06;
-        double viscosity_c = 1.0;
-        double reference_area = a0;
-        double elastic_modulus = 1.0;
-        double reference_pressure = 9.4666666;
-        double theta = 0.5;
 
         std::string output_filename = "output.vtk";
     };
