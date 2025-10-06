@@ -84,6 +84,7 @@ namespace dealii
     private:
         const FEValuesExtractors::Scalar area_extractor;
         const FEValuesExtractors::Scalar velocity_extractor;
+        void apply_positivity_limiter(Vector<double> &solution);
 
         class ExactSolution : public Function<spacedim>
         {

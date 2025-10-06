@@ -139,6 +139,8 @@ namespace dealii
         add_parameter("Pressure boundary expression", pressure_bc_expression);
     }
 
+    // rhs A and rhs U functions based on manufactured solution
+
     template <int dim, int spacedim>
     void
     BloodFlowSystem<dim, spacedim>::initialize_params(const std::string &filename)
@@ -148,6 +150,103 @@ namespace dealii
                                       ParameterHandler::Short);
     }
 
+    //...........................................................................................
+    // Exact solution, its gradient, and vectorized versions with right hand side functions
+    //...........................................................................................
+
+    template <int dim, int spacedim>
+    double
+    BloodFlowSystem<dim, spacedim>::ExactSolution::value(
+        const Point<spacedim> &p, const unsigned int component) const
+    {
+        // Parameters matching
+        const double r0 = 9.99e-3;
+        const double a0 = numbers::PI * r0 * r0;
+        const double L = 1.0;
+        const double T0 = 1.0;
+        const double atilde = 0.1 * a0;
+        const double qtilde = 0.0;
+
+        const double x = p[0];
+        const double t = this->get_time();
+
+        if (component == 0) // area A
+            return a0 + atilde * std::sin(2.0 * numbers::PI * x / L) *
+                            std::cos(2.0 * numbers::PI * t / T0);
+        else // velocity U
+            return qtilde - (atilde * L / T0) *
+                                std::cos(2.0 * numbers::PI * x / L) *
+                                std::sin(2.0 * numbers::PI * t / T0);
+    }
+
+    template <int dim, int spacedim>
+    void BloodFlowSystem<dim, spacedim>::ExactSolution::vector_value(
+        const Point<spacedim> &p, Vector<double> &values) const
+    {
+        Assert(values.size() == 2, ExcDimensionMismatch(values.size(), 2));
+        values[0] = value(p, 0);
+        values[1] = value(p, 1);
+    }
+
+    template <int dim, int spacedim>
+    Tensor<1, spacedim>
+    BloodFlowSystem<dim, spacedim>::ExactSolution::gradient(
+        const Point<spacedim> &p, const unsigned int component) const
+    {
+        // Parameters matching
+        const double r0 = 9.99e-3;
+        const double a0 = numbers::PI * r0 * r0;
+        const double L = 1.0;
+        const double T0 = 1.0;
+        const double atilde = 0.1 * a0;
+        const double qtilde = 0.0;
+
+        const double x = p[0];
+        const double t = this->get_time();
+
+        Tensor<1, spacedim> grad;
+
+        if (component == 0) // area A gradient
+        {
+            // dA/dx = atilde * (2\pi/L) * cos(2\pi x/L) * cos(2\pi t/T0)
+            grad[0] = atilde * (2.0 * numbers::PI / L) *
+                      std::cos(2.0 * numbers::PI * x / L) *
+                      std::cos(2.0 * numbers::PI * t / T0);
+        }
+        else if (component == 1) // velocity U gradient
+        {
+            // dU/dx = (atilde * L / T0) * (2\pi /L) * sin(2\pi x/L) * sin(2\pi t/T0)
+            grad[0] = (atilde * L / T0) * (2.0 * numbers::PI / L) *
+                      std::sin(2.0 * numbers::PI * x / L) *
+                      std::sin(2.0 * numbers::PI * t / T0);
+        }
+
+        return grad;
+    }
+
+    template <int dim, int spacedim>
+    void BloodFlowSystem<dim, spacedim>::ExactSolution::vector_gradient(
+        const Point<spacedim> &p,
+        std::vector<Tensor<1, spacedim>> &gradients) const
+    {
+        Assert(gradients.size() == 2, ExcDimensionMismatch(gradients.size(), 2));
+
+        gradients[0] = gradient(p, 0); // Area gradient
+        gradients[1] = gradient(p, 1); // Velocity gradient
+    }
+
+    template <int dim, int spacedim>
+    void BloodFlowSystem<dim, spacedim>::ExactSolution::vector_value_list(
+        const std::vector<Point<spacedim>> &points,
+        std::vector<Vector<double>> &value_list) const
+    {
+        const unsigned int n = points.size();
+        Assert(value_list.size() == n, ExcDimensionMismatch(value_list.size(), n));
+        for (unsigned int i = 0; i < n; ++i)
+            vector_value(points[i], value_list[i]);
+    }
+
+    // RHS A‐forcing term f_a(x,t)
     template <int spacedim>
     class RHS_A : public Function<spacedim>
     {
@@ -177,7 +276,7 @@ namespace dealii
         }
     };
 
-    // U‐forcing term fᵤ(x,t)
+    // U‐forcing term f_u(x,t)
     template <int spacedim>
     class RHS_U : public Function<spacedim>
     {
@@ -207,6 +306,10 @@ namespace dealii
             return std::cos(2.0 * numbers::PI * x / L) * std::cos(2.0 * numbers::PI * t / T0) * (-L * L / (T0 * T0) + elastic_modulus / (rho * std::pow(a0, m)) * std::pow(A, m - 1)) + (atilde - (atilde * L / T0) * std::cos(2.0 * numbers::PI * x / L) * std::sin(2.0 * numbers::PI * t / T0)) * ((2.0 * numbers::PI / T0) * atilde * std::sin(2.0 * numbers::PI * x / L) * std::sin(2.0 * numbers::PI * t / T0) + viscosity_c);
         }
     };
+
+    //.............................................................................................
+    // end of RHS functions
+    //.............................................................................................
 
     template <int dim, int spacedim>
     void
@@ -343,6 +446,17 @@ namespace dealii
             fe_v[area_extractor].get_function_values(solution_old, old_area_values);
             fe_v[velocity_extractor].get_function_values(solution_old, old_velocity_values);
 
+            /*
+             * Volume term assembly based on: equation :17 of the following paper
+             * -------------------------------------------------------------------------
+             * Computational modelling of 1D blood flow with variable mechanical properties
+             * and its application to the simulation of wave propagation in the human
+             * arterial system
+             *
+             * S. J. Sherwin, L. Formaggia, J. Peiró, V. Franke
+             * ------------------------------------
+             */
+
             for (unsigned int point = 0; point < fe_v.n_quadrature_points; ++point)
             {
                 //   const auto b_vec = advection_field_b<dim,
@@ -374,30 +488,33 @@ namespace dealii
                     for (unsigned int j = 0; j < n_dofs; ++j)
                     {
 
-                        // A-U block
+                        // A-U block : advection (-b.\nabla \phi_A , A_old U)
                         const double b_gradU = b_vec * fe_v[velocity_extractor].gradient(j, point); // removes product error
                         copy_data.cell_matrix(i, j) -=
                             fe_v[area_extractor].value(i, point) * A_old *
                             b_gradU * JxW[point];
 
-                        // add h ^ { eta }(\nabla u ^ n, \nabla \phi_U)
+                        // add h ^ { eta }(\nabla u ^ n, \nabla \phi_U) :  for stablizating oscillation based on step-33
                         const double h = std::sqrt(1.0 / triangulation.n_active_cells());
 
-                        copy_data.cell_matrix(i, j) -= std::pow(h, eta) * fe_v[velocity_extractor].gradient(i, point) * fe_v[velocity_extractor].gradient(j, point) * JxW[point];
-                        // copy_data.cell_matrix(i, j) += std::pow(h, eta) * fe_v[area_extractor].gradient(i, point) * fe_v[area_extractor].gradient(j, point) * JxW[point];
+                        copy_data.cell_matrix(i, j) += std::pow(h, eta) * fe_v[velocity_extractor].gradient(i, point) * fe_v[velocity_extractor].gradient(j, point) * JxW[point];
+                        copy_data.cell_matrix(i, j) += std::pow(h, eta) * fe_v[area_extractor].gradient(i, point) * fe_v[area_extractor].gradient(j, point) * JxW[point];
 
                         // Velocity equation U - U block : nonlinear convection + viscosity term
-                        const double nonlinear_conv = -U_old *
-                                                      (fe_v[velocity_extractor].value(j, point) *
-                                                       (b_vec * fe_v[velocity_extractor].gradient(i, point)));
+                        // \nabla_{\Gamma}(U^2/2) \phi_A = - (0.5* U_old* U, (b.\nabla \phi_U))
 
+                        const double nonlinear_conv = -0.5 * U_old *
+                                                      (fe_v[velocity_extractor].value(i, point) *
+                                                       (b_vec * fe_v[velocity_extractor].gradient(j, point)));
+
+                        // reaction term  (viscosity_c* U, \phi_U)
                         const double reaction = viscosity_c *
                                                 fe_v[velocity_extractor].value(i, point) *
                                                 fe_v[velocity_extractor].value(j, point);
 
                         copy_data.cell_matrix(i, j) += (nonlinear_conv + reaction) * JxW[point];
 
-                        // U-A block : pressure gradient term
+                        // U-A block : pressure gradient term (1/rho) \nabla_{\Gamma} P(A) \phi_U = - (1/rho) * (dP/dA(at A_old) * b.\nabla \phi_U, A)
 
                         if (A_old > 1e-12) // Avoid division by zero
 
@@ -421,6 +538,9 @@ namespace dealii
         };
 
         // Face worker lambda ‒ handles interior face integrals
+        //   Based on rusanov flux / local Lax-Friedrichs flux f(a, b) = 0.5*(f(a) + f(b)) - 0.5*alpha*(b-a)
+        //  where alpha = max(|u-c|, |u+c|) , c = wave speed
+
         auto face_worker = [&](const Iterator &cell,
                                const unsigned int f,
                                const unsigned int sf,
@@ -745,195 +865,6 @@ namespace dealii
                 }
             }
         }
-    }
-
-    // template <int dim, int spacedim>
-    // void BloodFlowSystem<dim, spacedim>::run()
-    // {
-    //     // Build initial mesh
-    //     GridGenerator::hyper_cube(triangulation);
-    //     triangulation.refine_global(n_global_refinements);
-
-    //     // Setup FE system
-    //     setup_system();
-    //     std::cout << "  Number of degrees of freedom: " << dof_handler.n_dofs()
-    //               << std::endl;
-
-    //     typename BloodFlowSystem<dim, spacedim>::ExactSolution exact_solution;
-
-    //     exact_solution.set_time(0.0);
-
-    //     // Assemble mass matrix
-    //     assemble_mass_matrix();
-
-    //     // Project initial conditions
-    //     AffineConstraints<double> constraints;
-    //     constraints.close();
-
-    //     VectorTools::project(dof_handler,
-    //                          constraints,
-    //                          QGauss<dim>(fe->tensor_degree() + 1),
-    //                          exact_solution,
-    //                          solution);
-
-    //     solution_old = solution;
-    //     compute_pressure();
-
-    //     // 5. Time loop setup
-    //     n_time_steps =
-    //         static_cast<unsigned int>(std::round(final_time / time_step));
-    //     system_matrix_time.reinit(sparsity_pattern);
-    //     tmp_vector.reinit(dof_handler.n_dofs());
-
-    //     std::cout << "  Number of time steps: " << n_time_steps
-    //               << " with time step size dt=" << time_step << std::endl;
-
-    //     SparseDirectUMFPACK direct;
-    //     if (use_direct_solver)
-    //     {
-    //         // For implicit time stepping: (M/dt + A) u^{n+1} = M/dt u^n + b
-    //         system_matrix_time.copy_from(mass_matrix);
-    //         system_matrix_time *= (1.0 / time_step);
-    //     }
-
-    //     time = 0.0;
-    //     output_results(0);
-
-    //     // 6. Time stepping
-    //     for (unsigned int step = 1; step <= n_time_steps; ++step)
-    //     {
-    //         time += time_step;
-    //         // update bc time in functions
-    //         exact_solution.set_time(time);
-
-    //         std::cout << "Step " << step << "  t=" << time << std::endl;
-
-    //         // Assemble system matrix (depends on solution_old for semi-implicit
-    //         // terms)
-    //         assemble_system();
-
-    //         // Form time-stepping system matrix: M/dt + A
-    //         system_matrix_time.copy_from(system_matrix);
-    //         system_matrix_time.add(1.0 / time_step, mass_matrix);
-
-    //         // Form right-hand side: M/dt * u_old + right_hand
-    //         mass_matrix.vmult(tmp_vector, solution_old);
-    //         tmp_vector *= (1.0 / time_step);
-    //         tmp_vector += right_hand_side;
-
-    //         SparseDirectUMFPACK direct;
-    //         // Solve time step
-    //         if (use_direct_solver)
-    //         {
-    //             direct.initialize(system_matrix_time);
-    //             direct.vmult(solution, tmp_vector);
-    //         }
-    //         else
-    //         {
-    //             SolverControl solver_control(1000, 1e-14);
-    //             SolverCG<> cg(solver_control);
-
-    //             PreconditionSSOR<> preconditioner;
-    //             preconditioner.initialize(system_matrix_time, 1.0);
-    //             cg.solve(system_matrix_time, solution, tmp_vector, preconditioner);
-    //         }
-
-    //         solution_old = solution;
-    //         compute_pressure();
-    //         output_results(step);
-    //     }
-    // }
-
-    template <int dim, int spacedim>
-    double
-    BloodFlowSystem<dim, spacedim>::ExactSolution::value(
-        const Point<spacedim> &p, const unsigned int component) const
-    {
-        // Parameters matching
-        const double r0 = 9.99e-3;
-        const double a0 = numbers::PI * r0 * r0;
-        const double L = 1.0;
-        const double T0 = 1.0;
-        const double atilde = 0.1 * a0;
-        const double qtilde = 0.0;
-
-        const double x = p[0];
-        const double t = this->get_time();
-
-        if (component == 0) // area A
-            return a0 + atilde * std::sin(2.0 * numbers::PI * x / L) *
-                            std::cos(2.0 * numbers::PI * t / T0);
-        else // velocity U
-            return qtilde - (atilde * L / T0) *
-                                std::cos(2.0 * numbers::PI * x / L) *
-                                std::sin(2.0 * numbers::PI * t / T0);
-    }
-
-    template <int dim, int spacedim>
-    void BloodFlowSystem<dim, spacedim>::ExactSolution::vector_value(
-        const Point<spacedim> &p, Vector<double> &values) const
-    {
-        Assert(values.size() == 2, ExcDimensionMismatch(values.size(), 2));
-        values[0] = value(p, 0);
-        values[1] = value(p, 1);
-    }
-
-    template <int dim, int spacedim>
-    Tensor<1, spacedim>
-    BloodFlowSystem<dim, spacedim>::ExactSolution::gradient(
-        const Point<spacedim> &p, const unsigned int component) const
-    {
-        // Parameters matching
-        const double r0 = 9.99e-3;
-        const double a0 = numbers::PI * r0 * r0;
-        const double L = 1.0;
-        const double T0 = 1.0;
-        const double atilde = 0.1 * a0;
-        const double qtilde = 0.0;
-
-        const double x = p[0];
-        const double t = this->get_time();
-
-        Tensor<1, spacedim> grad;
-
-        if (component == 0) // area A gradient
-        {
-            // dA/dx = atilde * (2\pi/L) * cos(2\pi x/L) * cos(2\pi t/T0)
-            grad[0] = atilde * (2.0 * numbers::PI / L) *
-                      std::cos(2.0 * numbers::PI * x / L) *
-                      std::cos(2.0 * numbers::PI * t / T0);
-        }
-        else if (component == 1) // velocity U gradient
-        {
-            // dU/dx = (atilde * L / T0) * (2\pi /L) * sin(2\pi x/L) * sin(2\pi t/T0)
-            grad[0] = (atilde * L / T0) * (2.0 * numbers::PI / L) *
-                      std::sin(2.0 * numbers::PI * x / L) *
-                      std::sin(2.0 * numbers::PI * t / T0);
-        }
-
-        return grad;
-    }
-
-    template <int dim, int spacedim>
-    void BloodFlowSystem<dim, spacedim>::ExactSolution::vector_gradient(
-        const Point<spacedim> &p,
-        std::vector<Tensor<1, spacedim>> &gradients) const
-    {
-        Assert(gradients.size() == 2, ExcDimensionMismatch(gradients.size(), 2));
-
-        gradients[0] = gradient(p, 0); // Area gradient
-        gradients[1] = gradient(p, 1); // Velocity gradient
-    }
-
-    template <int dim, int spacedim>
-    void BloodFlowSystem<dim, spacedim>::ExactSolution::vector_value_list(
-        const std::vector<Point<spacedim>> &points,
-        std::vector<Vector<double>> &value_list) const
-    {
-        const unsigned int n = points.size();
-        Assert(value_list.size() == n, ExcDimensionMismatch(value_list.size(), n));
-        for (unsigned int i = 0; i < n; ++i)
-            vector_value(points[i], value_list[i]);
     }
 
     template <int dim, int spacedim>
