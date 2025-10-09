@@ -21,6 +21,7 @@
 #include <deal.II/grid/grid_generator.h>
 
 #include <deal.II/lac/affine_constraints.h>
+#include <deal.II/lac/sparse_direct.h>
 
 #include <deal.II/numerics/vector_tools.h>
 
@@ -39,7 +40,7 @@ test_constant()
   problem.setup_system();
 
   FunctionParser<3> my_function(2);
-  my_function.initialize("x,t", "1.0; 0.0", {});
+  my_function.initialize("x,y,z", "1.0; 0.0", {});
 
   // Project initial conditions
   AffineConstraints<double> constraints;
@@ -55,7 +56,7 @@ test_constant()
 
 
   FunctionParser<3> my_test_function(2);
-  my_test_function.initialize("x,t", "1.0; 0.0", {});
+  my_test_function.initialize("x,y,z", "1.0; 0.0", {});
 
   VectorTools::project(problem.dof_handler,
                        constraints,
@@ -66,7 +67,15 @@ test_constant()
   auto rhs = problem.solution;
   problem.system_matrix.vmult(rhs, problem.solution);
 
-  deallog << "Solution norm: " << problem.solution.linfty_norm() << std::endl;
+  problem.assemble_mass_matrix();
+  SparseDirectUMFPACK inv_mass;
+  inv_mass.initialize(problem.mass_matrix);
+  inv_mass.vmult(rhs, rhs);
+
+  deallog << rhs << std::endl;
+
+
+  deallog << "Solution norm: " << rhs.linfty_norm() << std::endl;
 }
 
 
