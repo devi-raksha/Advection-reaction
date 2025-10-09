@@ -636,7 +636,7 @@ namespace dealii
     // Exact solution typedef for easy access
     using ExactSolution = ExactSolutionBloodFlow<spacedim>;
 
-  private:
+    //   private:
     // Mesh and finite elements
     Triangulation<dim, spacedim>                  triangulation;
     DoFHandler<dim, spacedim>                     dof_handler;
@@ -688,6 +688,17 @@ namespace dealii
     // RHS functions
     std::unique_ptr<RHS_A_BloodFlow<spacedim>> rhs_A_function;
     std::unique_ptr<RHS_U_BloodFlow<spacedim>> rhs_U_function;
+
+    // Allow access to private members for any function whose name contains
+    // "test"
+    template <typename T>
+    friend auto
+    test_access(T *) -> decltype(void(&T::test), int());
+
+    // Allow access to private members for all free functions whose name
+    // contains test
+    friend auto
+    test(...) -> void;
   };
 
 } // namespace dealii
