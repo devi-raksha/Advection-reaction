@@ -289,15 +289,6 @@ namespace dealii
       fe_iv.get_fe_face_values(1)[velocity_extractor].get_function_values(
         solution_old, U_R);
 
-      fe_iv.get_fe_face_values(0)[area_extractor].get_function_values(solution,
-                                                                      A_L_im);
-      fe_iv.get_fe_face_values(0)[velocity_extractor].get_function_values(
-        solution, U_L_im);
-      fe_iv.get_fe_face_values(1)[area_extractor].get_function_values(solution,
-                                                                      A_R_im);
-      fe_iv.get_fe_face_values(1)[velocity_extractor].get_function_values(
-        solution, U_R_im);
-
       copy.face_data.emplace_back();
       auto              &face = copy.face_data.back();
       const unsigned int nd   = fe_iv.n_current_interface_dofs();
@@ -313,8 +304,6 @@ namespace dealii
           // Left and right states
           const double AL = A_L[q], UL = U_L[q];
           const double AR = A_R[q], UR = U_R[q];
-          const double AL_im = A_L_im[q], UL_im = U_L_im[q];
-          const double AR_im = A_R_im[q], UR_im = U_R_im[q];
 
           // Compute pressures and wave speeds using header functions
           const double PL = compute_pressure_value<dim, spacedim>(
@@ -322,51 +311,51 @@ namespace dealii
           const double PR = compute_pressure_value<dim, spacedim>(
             AR, reference_area, elastic_modulus, reference_pressure);
 
-          const double cL    = compute_wave_speed<dim, spacedim>(AL,
+          const double cL = compute_wave_speed<dim, spacedim>(AL,
                                                               reference_area,
                                                               elastic_modulus,
                                                               rho);
-          const double cR    = compute_wave_speed<dim, spacedim>(AR,
+          const double cR = compute_wave_speed<dim, spacedim>(AR,
                                                               reference_area,
                                                               elastic_modulus,
                                                               rho);
-          const double cL_im = compute_wave_speed<dim, spacedim>(
-            AL_im, reference_area, elastic_modulus, rho);
-          const double cR_im = compute_wave_speed<dim, spacedim>(
-            AR_im, reference_area, elastic_modulus, rho);
 
-          // Compute numerical fluxes using header functions
-          const auto [flux_A, flux_U] =
-            compute_numerical_flux_rusanov_semi_implicit<dim, spacedim>(
-              AL,
-              UL,
-              AR,
-              UR,
-              AL_im,
-              UL_im,
-              AR_im,
-              UR_im,
-              PL,
-              PR,
-              cL_im,
-              cR_im,
-              rho,
-              b_dot_n);
 
           // Penalty parameter
           const double h_face = cell->measure();
           const double sigma =
             compute_penalty_parameter<dim, spacedim>(cL, cR, h_face, theta);
 
-          for (unsigned int i = 0; i < nd; ++i)
+          for (unsigned int j = 0; j < nd; ++j)
             {
-              for (unsigned int j = 0; j < nd; ++j)
+              auto UL_im = fe_iv[velocity_extractor].value(0, j, q);
+              auto UR_im = fe_iv[velocity_extractor].value(1, j, q);
+              auto AL_im = fe_iv[area_extractor].value(0, j, q);
+              auto AR_im = fe_iv[area_extractor].value(1, j, q);
+
+              // Compute numerical fluxes using header functions
+              const auto [flux_A, flux_U] =
+                compute_numerical_flux_rusanov_semi_implicit<dim, spacedim>(
+                  AL,
+                  UL,
+                  AR,
+                  UR,
+                  AL_im,
+                  UL_im,
+                  AR_im,
+                  UR_im,
+                  PL,
+                  PR,
+                  cL,
+                  cR,
+                  rho,
+                  b_dot_n);
+
+              for (unsigned int i = 0; i < nd; ++i)
                 {
                   face.cell_matrix(i, j) +=
-                    (flux_A * fe_iv[area_extractor].jump_in_values(i, q) *
-                       fe_iv[area_extractor].jump_in_values(j, q) +
-                     flux_U * fe_iv[velocity_extractor].jump_in_values(i, q) *
-                       fe_iv[velocity_extractor].jump_in_values(j, q) +
+                    (flux_A * fe_iv[area_extractor].jump_in_values(i, q) +
+                     flux_U * fe_iv[velocity_extractor].jump_in_values(i, q) +
                      sigma * (fe_iv[velocity_extractor].jump_in_values(i, q) *
                                 fe_iv[velocity_extractor].jump_in_values(j, q) +
                               fe_iv[area_extractor].jump_in_values(i, q) *
