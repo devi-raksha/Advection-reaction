@@ -220,12 +220,15 @@ namespace dealii
                   // A-U block: semi-implicit advection term
                   const double b_gradA =
                     b_vec * fe_v[area_extractor].gradient(i, point);
-                  copy_data.cell_matrix(i, j) -=
-                    0.5 *
-                    (fe_v[area_extractor].value(j, point) * U_old * b_gradA +
-                     fe_v[velocity_extractor].value(j, point) * A_old *
-                       b_gradA) *
-                    JxW[point];
+                  copy_data.cell_matrix(i, j) -= fe_v[area_extractor].value(j, point) * fe_v[velocity_extractor].value(j, point)*
+                                                  b_gradA *JxW[point];
+                                              
+                                                
+                    // 0.5 *
+                    // (fe_v[area_extractor].value(j, point) * U_old * b_gradA +
+                    //  fe_v[velocity_extractor].value(j, point) * A_old *
+                    //    b_gradA) *
+                    // JxW[point];
 
                   // U-U block: nonlinear convection + viscosity
                   const double nonlinear_conv =
@@ -417,9 +420,9 @@ namespace dealii
                                                               rho);
 
           // Compute boundary flux using header functions
-          const auto [flux_A, flux_U] =
-            compute_numerical_flux_rusanov<dim, spacedim>(
-              AL, UL, AR, UR, PL, PR, cL, cR, rho, b_dot_n);
+          //   const auto [flux_A, flux_U] =
+          //     compute_numerical_flux_rusanov<dim, spacedim>(
+          //       AL, UL, AR, UR, PL, PR, cL, cR, rho, b_dot_n);
 
           // Physical fluxes for RHS
           const double FA_R =
@@ -427,21 +430,49 @@ namespace dealii
           const double FU_R =
             compute_physical_momentum_flux<dim, spacedim>(UR, PR, rho, b_dot_n);
 
-          for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+          const double FA_L =
+            compute_physical_area_flux<dim, spacedim>(AL, UL, b_dot_n);
+          const double FU_L =
+            compute_physical_momentum_flux<dim, spacedim>(UL, PL, rho, b_dot_n);
+
+
+          for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
             {
-              for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
+              auto UL_im = fe_face[velocity_extractor].value(j, q);
+              auto AL_im = fe_face[area_extractor].value(j, q);
+              auto UR_im = bc[q](1);
+              auto AR_im = bc[q](0);
+
+              // Compute numerical fluxes using header functions
+              const auto [flux_A, flux_U] =
+                compute_numerical_flux_rusanov_semi_implicit<dim, spacedim>(
+                  AL,
+                  UL,
+                  AR,
+                  UR,
+                  AL_im,
+                  UL_im,
+                  AR_im,
+                  UR_im,
+                  PL,
+                  PR,
+                  cL,
+                  cR,
+                  rho,
+                  b_dot_n);
+
+              for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
                 {
                   copy.cell_matrix(i, j) +=
-                    (flux_A * fe_face[area_extractor].value(i, q) *
-                       fe_face[area_extractor].value(j, q) +
-                     flux_U * fe_face[velocity_extractor].value(i, q) *
-                       fe_face[velocity_extractor].value(j, q)) *
+                    (flux_A * fe_face[area_extractor].value(i, q) +
+                     flux_U * fe_face[velocity_extractor].value(i, q)) *
                     JxW[q];
                 }
 
-              copy.cell_rhs(i) +=
-                -(FA_R * fe_face[area_extractor].value(i, q) +
-                  FU_R * fe_face[velocity_extractor].value(i, q)) *
+              copy.cell_rhs(j) +=
+                -0.5 *
+                ((FA_R + FA_L) * fe_face[area_extractor].value(j, q) +
+                 (FU_R + FU_L) * fe_face[velocity_extractor].value(j, q)) *
                 JxW[q];
             }
         }
@@ -472,6 +503,11 @@ namespace dealii
                                                      quadrature_face);
     BloodFlowCopyData                   copy_data;
 
+    auto null_boundary = [](const auto &cell,
+                        const unsigned int face_no,
+                        auto &scratch,
+                        auto &copy) {};
+
     MeshWorker::mesh_loop(dof_handler.begin_active(),
                           dof_handler.end(),
                           cell_worker,
@@ -481,8 +517,7 @@ namespace dealii
                           MeshWorker::assemble_own_cells |
                             MeshWorker::assemble_boundary_faces |
                             MeshWorker::assemble_own_interior_faces_once,
-                          boundary_worker,
-                          face_worker);
+                          boundary_worker);                     
   }
 
   template <int dim, int spacedim>
