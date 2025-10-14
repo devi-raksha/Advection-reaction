@@ -187,45 +187,76 @@ compute_momentum_convection_flux(const double momentum_old,
 /**
  * Updated numerical Rusanov flux computation
  */
+/**
+ * Compute Rusanov (Lax–Friedrichs) flux for the area equation:
+ * ̂F_A = 0.5(F_A⁻ + F_A⁺) – 0.5 α (A⁺ – A⁻)
+ */
 template <int dim, int spacedim>
-std::pair<double, double>
-compute_numerical_flux_rusanov(const double area_left_old,
-                               const double momentum_left_old,
-                               const double area_right_old,
-                               const double momentum_right_old,
-                               const double area_left_new,
-                               
-                               const double area_right_new,
-                               
-                               const double reference_area,
-                               const double elastic_modulus,
-                               const double rho,
-                               const double b_dot_n)
+double
+compute_area_rusanov_flux(const double area_left_new,
+                          const double area_right_new,
+                          const double area_left_old,
+                          const double area_right_old,
+                          const double reference_area,
+                          const double elastic_modulus,
+                          const double rho,
+                          const double b_dot_n)
 {
-  // Area flux: A^{n+1} * P(A^n) / ρ
+  // Physical one‐sided fluxes
   const double FA_L = compute_area_pressure_flux<dim, spacedim>(
     area_left_new, area_left_old, reference_area, elastic_modulus, rho) * b_dot_n;
   const double FA_R = compute_area_pressure_flux<dim, spacedim>(
     area_right_new, area_right_old, reference_area, elastic_modulus, rho) * b_dot_n;
 
-  // Momentum flux: (Q^n)^2 / (ρ * A^n)
+  // Penalty parameter
+  const double alpha = compute_rusanov_penalty_area<dim, spacedim>(
+    area_left_old, area_right_old, reference_area, elastic_modulus, rho);
+
+  // Rusanov flux
+  return 0.5 * (FA_L + FA_R) - 0.5 * alpha * (area_right_new - area_left_new);
+}
+
+
+/**
+ * Compute Rusanov (Lax–Friedrichs) flux for the momentum equation:
+ * ̂F_Q = 0.5(F_Q⁻ + F_Q⁺) – 0.5 beta (Q⁺ – Q⁻)
+ */
+template <int dim, int spacedim>
+double
+compute_momentum_rusanov_flux(const double momentum_left_old,
+                              const double momentum_right_old,
+                              const double area_left_old,
+                              const double area_right_old,
+                              const double rho,
+                              const double b_dot_n)
+{
+  // Physical one‐sided fluxes
   const double FQ_L = compute_momentum_convection_flux<dim, spacedim>(
     momentum_left_old, area_left_old, rho) * b_dot_n;
   const double FQ_R = compute_momentum_convection_flux<dim, spacedim>(
     momentum_right_old, area_right_old, rho) * b_dot_n;
 
-  // Lax-Friedrichs penalty parameters
-  const double alpha = compute_rusanov_penalty_area<dim, spacedim>(
-    area_left_old, area_right_old, reference_area, elastic_modulus, rho);
+  // Penalty parameter
   const double beta = compute_rusanov_penalty_momentum<dim, spacedim>(
     momentum_left_old, momentum_right_old, area_left_old, area_right_old, rho);
 
-  // Rusanov fluxes
-  const double flux_A = 0.5 * (FA_L + FA_R) - 0.5 * alpha * (area_right_new - area_left_new);
-  const double flux_Q = 0.5 * (FQ_L + FQ_R) - 0.5 * beta * (momentum_right - momentum_left);
-
-  return std::make_pair(flux_A, flux_Q);
+  // Rusanov flux
+  return 0.5 * (FQ_L + FQ_R) - 0.5 * beta * (momentum_right_old - momentum_left_old);
 }
+
+
+ /**
+   * Compute tangent-normal product b·n
+   */
+  template <int dim, int spacedim, typename CellIterator>
+  double
+  compute_tangent_normal_product(const CellIterator        &cell,
+                                 const Tensor<1, spacedim> &normal)
+  {
+    const auto b_vec = (cell->vertex(1) - cell->vertex(0)) /
+                       cell->vertex(1).distance(cell->vertex(0));
+    return b_vec * normal;
+  }
 
   //====================================================================
   // EXACT SOLUTION AND MANUFACTURED SOLUTION
@@ -252,9 +283,8 @@ compute_numerical_flux_rusanov(const double area_left_old,
     {
       const double x = p[0];
       const double t = this->get_time();
-
+       const double u_c = 4.0; // baseline velocity
       if (component == 0) // area A
-      const double u_c = 4.0; // baseline velocity
         return std::pow(std::sin(2.0 * numbers::PI * x) + u_c, -1);
       else // momentum q
         return 1.0 ;
@@ -564,14 +594,14 @@ compute_numerical_flux_rusanov(const double area_left_old,
     double eta                = BloodFlowParameters::DEFAULT_ETA;
 
     // Function expressions for initial and boundary conditions
-    // std::string initial_A_expression =
-    //   "3.141592653589793e-4 + 3.141592653589793e-5 * sin(2*3.141592653589793*x)";
-    // std::string initial_U_expression   = "0.0";
-    // std::string pressure_bc_expression = "0.0";
+    std::string initial_A_expression =
+      "1/ (sin(2*pi*x)+4)"; // Manufactured solution
+    std::string initial_Q_expression   = "1";
+    //std::string pressure_bc_expression = "0.0";
 
     // Function parsers
     FunctionParser<spacedim> initial_A;
-    FunctionParser<spacedim> initial_U;
+    FunctionParser<spacedim> initial_Q;
     FunctionParser<spacedim> pressure_bc;
 
     // RHS functions

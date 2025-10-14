@@ -46,7 +46,7 @@ namespace dealii
     add_parameter("Eta (stability parameter)", eta);
     add_parameter("Initial condition A expression", initial_A_expression);
     add_parameter("Initial condition U expression", initial_Q_expression);
-    add_parameter("Pressure boundary expression", pressure_bc_expression);
+    //add_parameter("Pressure boundary expression", pressure_bc_expression);
   }
 
   template <int dim, int spacedim>
@@ -87,8 +87,8 @@ namespace dealii
           vars = "x,y,z";
         std::map<std::string, double> const_map;
         initial_A.initialize(vars, initial_A_expression, const_map);
-        initial_U.initialize(vars, initial_Q_expression, const_map);
-        pressure_bc.initialize(vars, pressure_bc_expression, const_map);
+        initial_Q.initialize(vars, initial_Q_expression, const_map);
+        // pressure_bc.initialize(vars, pressure_bc_expression, const_map);
       }
 
     dof_handler.distribute_dofs(*fe);
@@ -279,10 +279,8 @@ namespace dealii
       const auto &normals    = fe_iv.get_fe_face_values(0).get_normal_vectors();
       const unsigned int n_q = fe_iv.get_fe_face_values(0).n_quadrature_points;
 
-      // Extract solution values
+      // Extract solution values (old time level)
       std::vector<double> A_L(n_q), Q_L(n_q), A_R(n_q), Q_R(n_q);
-      std::vector<double> A_L_im(n_q), Q_L_im(n_q), A_R_im(n_q), Q_R_im(n_q);
-
       fe_iv.get_fe_face_values(0)[area_extractor].get_function_values(
         solution_old, A_L);
       fe_iv.get_fe_face_values(0)[momentum_extractor].get_function_values(
@@ -297,7 +295,7 @@ namespace dealii
       const unsigned int nd   = fe_iv.n_current_interface_dofs();
       face.joint_dof_indices  = fe_iv.get_interface_dof_indices();
       face.cell_matrix.reinit(nd, nd);
-
+      face.cell_rhs.reinit(nd);
 
       for (unsigned int q = 0; q < n_q; ++q)
         {
@@ -305,91 +303,48 @@ namespace dealii
           const double b_dot_n =
             compute_tangent_normal_product<dim, spacedim>(cell, normal);
 
-          // Left and right states
-          const double AL = A_L[q], QL = Q_L[q];
-          const double AR = A_R[q], QR = Q_R[q];
-
-          // Compute pressures and wave speeds using header functions
-          const double PL = compute_pressure_value<dim, spacedim>(
-            AL, reference_area, elastic_modulus, reference_pressure);
-          const double PR = compute_pressure_value<dim, spacedim>(
-            AR, reference_area, elastic_modulus, reference_pressure);
-
-          const double cL = compute_wave_speed<dim, spacedim>(AL,
-                                                              reference_area,
-                                                              elastic_modulus,
-                                                              rho);
-          const double cR = compute_wave_speed<dim, spacedim>(AR,
-                                                              reference_area,
-                                                              elastic_modulus,
-                                                              rho);
-
-
-          // Penalty parameter
-          const double h_face = cell->measure();
-          const double sigma =
-            compute_penalty_parameter<dim, spacedim>(cL, cR, h_face, theta);
+          // Left and right states (old time level)
+          const double AL_old = A_L[q], QL_old = Q_L[q];
+          const double AR_old = A_R[q], QR_old = Q_R[q];
 
           for (unsigned int j = 0; j < nd; ++j)
             {
-              auto QL_im  = fe_iv[momentum_extractor].value(0, j, q);
-              auto QR_im  = fe_iv[momentum_extractor].value(1, j, q);
-              auto Q_avg  = 0.5 * (QL_im + QR_im);
-              auto Q_jump = sigma * (QR_im - QL_im);
+              // New time level basis function values
+              const double AL_new = fe_iv[area_extractor].value(0, j, q);
+              const double AR_new = fe_iv[area_extractor].value(1, j, q);
 
-              auto AL_im = fe_iv[area_extractor].value(0, j, q);
-              auto AR_im = fe_iv[area_extractor].value(1, j, q);
+              // Compute numerical fluxes
+              const double flux_A =
+                compute_area_rusanov_flux<dim, spacedim>(AL_new,
+                                                         AR_new,
+                                                         AL_old,
+                                                         AR_old,
+                                                         reference_area,
+                                                         elastic_modulus,
+                                                         rho,
+                                                         b_dot_n);
 
-              // Compute numerical fluxes using header functions
-              double flux_A =
-                compute_numerical_flux_rusanov<dim, spacedim>(AL,
-                                                              QL,
-                                                              AR,
-                                                              QR,
-                                                              AL_im,
-                                                              AR_im,
-                                                              reference_area,
-                                                              elastic_modulus,
-                                                              rho,
-                                                              b_dot_n)
-                  .first;
-
-
+              const double flux_Q =
+                compute_momentum_rusanov_flux<dim, spacedim>(
+                  QL_old, QR_old, AL_old, AR_old, rho, b_dot_n);
 
               for (unsigned int i = 0; i < nd; ++i)
                 {
+                  // Area equation: flux_A contribution
                   face.cell_matrix(i, j) +=
-                    Q_avg * fe_iv[momentum_extractor].jump_in_values(i, q) *
-                      JxW[q] +
-                    Q_jump * fe_iv[momentum_extractor].average_value(j, q) *
-                      JxW[q];
+                    flux_A * fe_iv[area_extractor].jump_in_values(i, q) *
+                    JxW[q];
 
-                  face.cell_matrix(i, j) +=
-                    flux_A * fe_iv[momentum_extractor].jump_in_values(i, q) *
+                  // Momentum equation: flux_Q contribution
+                  face.cell_rhs(i) +=
+                    flux_Q * fe_iv[momentum_extractor].jump_in_values(i, q) *
                     JxW[q];
                 }
-              double flux_Q =
-                compute_numerical_flux_rusanov<dim, spacedim>(AL,
-                                                              QL,
-                                                              AR,
-                                                              QR,
-                                                              AL_im,
-                                                              AR_im,
-                                                              reference_area,
-                                                              elastic_modulus,
-                                                              rho,
-                                                              b_dot_n)
-                  .second;
-
-              // Assemble RHS Contribution
-              face.cell_rhs(j) +=
-                flux_Q * fe_iv[momentum_extractor].jump_in_values(j, q) *
-                JxW[q];
             }
         }
     };
 
-    // Boundary worker using header exact solution
+    // Boundary worker with periodic and Dirichlet support
     ExactSolutionBloodFlow<spacedim> exact_solution;
     exact_solution.set_time(time);
 
@@ -404,96 +359,160 @@ namespace dealii
       const auto        &normals = fe_face.get_normal_vectors();
       const unsigned int n_q     = fe_face.n_quadrature_points;
 
-      // Interior trace
+      // Interior trace (left state)
       std::vector<double> A_L(n_q), Q_L(n_q);
       fe_face[area_extractor].get_function_values(solution_old, A_L);
       fe_face[momentum_extractor].get_function_values(solution_old, Q_L);
-
-      // Boundary data from exact solution
-      std::vector<Vector<double>> bc(n_q, Vector<double>(2));
-      exact_solution.vector_value_list(fe_face.get_quadrature_points(), bc);
 
       copy.cell_matrix.reinit(fe_face.get_fe().dofs_per_cell,
                               fe_face.get_fe().dofs_per_cell);
       copy.cell_rhs.reinit(fe_face.get_fe().dofs_per_cell);
 
-      for (unsigned int q = 0; q < n_q; ++q)
+      // Check boundary type
+      const auto boundary_id = cell->face(face_no)->boundary_id();
+
+      if (boundary_id == 0 || boundary_id == 1) // Periodic boundaries
         {
-          const double b_dot_n =
-            compute_tangent_normal_product<dim, spacedim>(cell, normals[q]);
+          // For now, use exact solution as placeholder
+          std::vector<Vector<double>> bc(n_q, Vector<double>(2));
+          exact_solution.vector_value_list(fe_face.get_quadrature_points(), bc);
 
-          const double AL = A_L[q], QL = Q_L[q];
-          const double AR = bc[q](0), QR = bc[q](1);
-
-          // Compute pressures and wave speeds using header functions
-          const double PL = compute_pressure_value<dim, spacedim>(
-            AL, reference_area, elastic_modulus, reference_pressure);
-          const double PR = compute_pressure_value<dim, spacedim>(
-            AR, reference_area, elastic_modulus, reference_pressure);
-          const double cL = compute_wave_speed<dim, spacedim>(AL,
-                                                              reference_area,
-                                                              elastic_modulus,
-                                                              rho);
-          const double cR = compute_wave_speed<dim, spacedim>(AR,
-                                                              reference_area,
-                                                              elastic_modulus,
-                                                              rho);
-
-          // Compute boundary flux using header functions
-          //   const auto [flux_A, flux_U] =
-          //     compute_numerical_flux_rusanov<dim, spacedim>(
-          //       AL, QL, AR, QR, PL, PR, cL, cR, rho, b_dot_n);
-
-          // Physical fluxes for RHS
-          const double FA_R =
-            compute_physical_area_flux<dim, spacedim>(AR, QR, b_dot_n);
-          const double FQ_R =
-            compute_physical_momentum_flux<dim, spacedim>(UR, PR, rho, b_dot_n);
-
-          const double FA_L =
-            compute_physical_area_flux<dim, spacedim>(AL, QL, b_dot_n);
-          const double FQ_L =
-            compute_physical_momentum_flux<dim, spacedim>(UL, PL, rho, b_dot_n);
-
-
-          for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
+          for (unsigned int q = 0; q < n_q; ++q)
             {
-              auto QL_im = fe_face[momentum_extractor].value(j, q);
-              auto AL_im = fe_face[area_extractor].value(j, q);
-              auto QR_im = bc[q](1);
-              auto AR_im = bc[q](0);
+              const double b_dot_n =
+                compute_tangent_normal_product<dim, spacedim>(cell, normals[q]);
 
-              // Compute numerical fluxes using header functions
-              const auto [flux_A, flux_U] =
-                compute_numerical_flux_rusanov_semi_implicit<dim, spacedim>(
-                  AL,
-                  QL,
-                  AR,
-                  QR,
-                  AL_im,
-                  QL_im,
-                  AR_im,
-                  QR_im,
-                  PL,
-                  PR,
-                  cL,
-                  cR,
-                  rho,
-                  b_dot_n);
+              // States
+              const double AL_old = A_L[q], QL_old = Q_L[q];
+              const double AR_old = bc[q](0),
+                           QR_old = bc[q](1); // From periodic neighbor
 
-              for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+              for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
                 {
-                  copy.cell_matrix(i, j) +=
-                    (flux_A * fe_face[area_extractor].value(i, q) +
-                     flux_U * fe_face[momentum_extractor].value(i, q)) *
-                    JxW[q];
-                }
+                  // New time level basis values
+                  const double AL_new = fe_face[area_extractor].value(j, q);
+                  const double AR_new =
+                    bc[q](0); // Prescribed boundary (or from periodic neighbor)
 
-              copy.cell_rhs(j) +=
-                -0.5 *
-                ((FA_R + FA_L) * fe_face[area_extractor].value(j, q) +
-                 (FQ_R + FQ_L) * fe_face[momentum_extractor].value(j, q)) *
-                JxW[q];
+                  // Compute fluxes
+                  const double flux_A =
+                    compute_area_rusanov_flux<dim, spacedim>(AL_new,
+                                                             AR_new,
+                                                             AL_old,
+                                                             AR_old,
+                                                             reference_area,
+                                                             elastic_modulus,
+                                                             rho,
+                                                             b_dot_n);
+
+                  const double flux_Q =
+                    compute_momentum_rusanov_flux<dim, spacedim>(
+                      QL_old, QR_old, AL_old, AR_old, rho, b_dot_n);
+
+                  for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell;
+                       ++i)
+                    {
+                      // 1) Area equation: flux_A contribution
+                      copy.cell_matrix(i, j) +=
+                        flux_A * fe_face[area_extractor].value(i, q) * JxW[q];
+
+                      // 2) -<A^{n+1}P(A^n)/ρ, φ_Q> (implicit in matrix)
+                      const double P_boundary_old =
+                        compute_pressure_value<dim, spacedim>(
+                          AR_old,
+                          reference_area,
+                          elastic_modulus,
+                          reference_pressure);
+                      copy.cell_matrix(i, j) -=
+                        (AR_new * P_boundary_old / rho) *
+                        fe_face[momentum_extractor].value(i, q) * JxW[q];
+                    }
+
+                  // RHS contributions
+                  
+                      // 1) -<Q^{n+1}, φ_A>
+                      copy.cell_rhs(j) -=
+                        QR_old * fe_face[area_extractor].value(j, q) * JxW[q];
+
+                      // 2) Momentum flux contribution
+                      copy.cell_rhs(j) +=
+                        flux_Q * fe_face[momentum_extractor].value(j, q) *
+                        JxW[q];
+                    
+                }
+            }
+        }
+      else // Dirichlet boundary
+        {
+          // Boundary data from exact solution
+          std::vector<Vector<double>> bc(n_q, Vector<double>(2));
+          exact_solution.vector_value_list(fe_face.get_quadrature_points(), bc);
+
+          for (unsigned int q = 0; q < n_q; ++q)
+            {
+              const double b_dot_n =
+                compute_tangent_normal_product<dim, spacedim>(cell, normals[q]);
+
+              // States
+              const double AL_old = A_L[q], QL_old = Q_L[q];
+              const double AR_old = bc[q](0),
+                           QR_old = bc[q](1); // Prescribed values
+
+              for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
+                {
+                  // New time level basis values
+                  const double AL_new = fe_face[area_extractor].value(j, q);
+                  const double AR_new = bc[q](0); // Prescribed boundary value
+
+                  // Compute fluxes
+                  const double flux_A =
+                    compute_area_rusanov_flux<dim, spacedim>(AL_new,
+                                                             AR_new,
+                                                             AL_old,
+                                                             AR_old,
+                                                             reference_area,
+                                                             elastic_modulus,
+                                                             rho,
+                                                             b_dot_n);
+
+                  const double flux_Q =
+                    compute_momentum_rusanov_flux<dim, spacedim>(
+                      QL_old, QR_old, AL_old, AR_old, rho, b_dot_n);
+
+                  for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell;
+                       ++i)
+                    {
+                      // Matrix contributions (implicit terms)
+                      // 1) Area equation flux
+                      copy.cell_matrix(i, j) +=
+                        flux_A * fe_face[area_extractor].value(i, q) * JxW[q];
+
+                      // 2) -<A^{n+1}P(A^n)/ρ, φ_Q>
+                      const double P_boundary_old =
+                        compute_pressure_value<dim, spacedim>(
+                          AR_old,
+                          reference_area,
+                          elastic_modulus,
+                          reference_pressure);
+                      copy.cell_matrix(i, j) -=
+                        (AR_new * P_boundary_old / rho) *
+                        fe_face[momentum_extractor].value(i, q) * JxW[q];
+                    }
+
+                  // RHS contributions (explicit terms)
+                  for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell;
+                       ++i)
+                    {
+                      // 1) -<Q^{n+1}, φ_A>
+                      copy.cell_rhs(i) -=
+                        QR_old * fe_face[area_extractor].value(i, q) * JxW[q];
+
+                      // 2) -<Q^n*Q^n/(A^n*ρ), φ_Q> (from momentum flux)
+                      copy.cell_rhs(i) +=
+                        flux_Q * fe_face[momentum_extractor].value(i, q) *
+                        JxW[q];
+                    }
+                }
             }
         }
     };
@@ -537,9 +556,8 @@ namespace dealii
                           MeshWorker::assemble_own_cells |
                             MeshWorker::assemble_boundary_faces |
                             MeshWorker::assemble_own_interior_faces_once,
-                          null_boundary,
-                          0,
-                          1);
+                          boundary_worker,
+                          face_worker);
   }
 
   template <int dim, int spacedim>
@@ -751,6 +769,7 @@ namespace dealii
     last_momentum_H1_error = momentum_H1_error;
   }
 
+
   template <int dim, int spacedim>
   void
   BloodFlowSystem<dim, spacedim>::run_convergence_study()
@@ -774,8 +793,6 @@ namespace dealii
 
         setup_system();
 
-
-
         ExactSolutionBloodFlow<spacedim> exact_solution;
         exact_solution.set_time(0.0);
 
@@ -798,13 +815,6 @@ namespace dealii
           static_cast<unsigned int>(std::round(final_time / time_step));
         system_matrix_time.reinit(sparsity_pattern);
         tmp_vector.reinit(dof_handler.n_dofs());
-        const double CFL =
-          time_step /
-          (1.0 / std::pow(triangulation.n_active_cells(), 1.0 / dim));
-        if (CFL > 0.9)
-          std::cerr << "[WARNING] CFL condition likely violated: CFL=" << CFL
-                    << std::endl;
-
 
         for (unsigned int step = 1; step <= n_time_steps; ++step)
           {
@@ -820,7 +830,7 @@ namespace dealii
             system_matrix_time.copy_from(system_matrix);
             system_matrix_time.add(1.0 / time_step, mass_matrix);
 
-            // Form right-hand side: M/dt * Q_old + right_hand
+            // Form right-hand side: M/dt * u_old + right_hand
             mass_matrix.vmult(tmp_vector, solution_old);
             tmp_vector *= (1.0 / time_step);
             tmp_vector += right_hand_side;
@@ -856,13 +866,13 @@ namespace dealii
             compute_pressure();
             output_results(step);
           }
-      }
-    // Compute errors at final time
-    compute_errors(cycle);
-  }
-}
 
-// Explicit instantiation
-template class BloodFlowSystem<1, 3>;
+        // Compute errors at final time
+        compute_errors(cycle);
+      }
+  }
+
+  // Explicit instantiation
+  template class BloodFlowSystem<1, 3>;
 
 } // namespace dealii
