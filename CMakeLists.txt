@@ -30,6 +30,7 @@
 # Set the names of the projects and targets:
 SET(TARGET1 "DG_advection_reaction_estimator")
 SET(TARGET2 "blood_flow_system_updated_1d3d")
+SET(TARGET3 "burger_equation")
 
 # Declare all source files for each target:
 SET(TARGET1_SRC
@@ -40,6 +41,11 @@ SET(TARGET1_SRC
 set(TARGET2_SRC
   source/blood_flow_system_updated_1d3d.cc
   main_updated_1d3d.cc
+)
+
+set(TARGET3_SRC
+  source/burger_equation.cc
+  main_burger.cc
 )
 
 CMAKE_MINIMUM_REQUIRED(VERSION 3.13.4)
@@ -65,6 +71,9 @@ DEAL_II_SETUP_TARGET(${TARGET1})
 # Create second executable target  
 ADD_EXECUTABLE(${TARGET2} ${TARGET2_SRC})
 DEAL_II_SETUP_TARGET(${TARGET2})
+
+ADD_EXECUTABLE(${TARGET3} ${TARGET3_SRC})
+DEAL_II_SETUP_TARGET(${TARGET3})
 
 # Add tests
 ADD_SUBDIRECTORY(tests)
