@@ -129,20 +129,6 @@ namespace dealii
     return b * normal;
   }
 
-  template <int dim, int spacedim>
-  double
-  compute_burger_lax_friedrichs_flux(const double u_left,
-                                     const double u_old_left,
-                                     const double u_right,
-                                     const double u_old_right,
-                                     const double b_dot_n)
-  {
-    const double F_L = 0.5 * u_left * u_old_left * b_dot_n;
-    const double F_R = 0.5 * u_right * u_old_right * b_dot_n;
-    const double alpha =
-      0.5 * std::max(std::abs(u_left), std::abs(u_right)) * std::abs(b_dot_n);
-    return 0.5 * (F_L + F_R - alpha * (u_right - u_left));
-  }
 
   // ---------------------
   // Main class
@@ -284,24 +270,34 @@ namespace dealii
       std::vector<double> u_old(fe_v.n_quadrature_points);
       fe_v[u_extractor].get_function_values(solution_old, u_old);
 
-      // Source term f(x,t)
+      std::vector<Tensor<1, spacedim>> grad_uold(fe_v.n_quadrature_points);
+      fe_v[u_extractor].get_function_gradients(solution_old, grad_uold);
+
+      // Unit tangent vector along the embedded 1D edge
+      const auto b_vec = (cell->vertex(1) - cell->vertex(0)) /
+                         cell->vertex(1).distance(cell->vertex(0));
+
+      // Source term f(x,t^{n+1})
       rhs_function->set_time(time);
 
       for (unsigned int q = 0; q < fe_v.n_quadrature_points; ++q)
         {
           const double rhs_value = rhs_function->value(q_points[q]);
           const double u_old_q   = u_old[q];
+          const double du_n      = grad_uold[q] * b_vec;
 
-          // Loop over test (i) and trial (j) dofs
+          const double h   = cell->diameter();
+          const double eta = std::pow(h, theta);
+
           for (unsigned int i = 0; i < ndofs; ++i)
             {
               for (unsigned int j = 0; j < ndofs; ++j)
                 {
-                  // Semi-implicit volume term: -(u_old * u_new, ∂_x φ_i)
-                  copy.cell_matrix(i, j) -= 0.5*
-                    u_old_q * fe_v[u_extractor].value(j, q) // u^{n+1} basis
-                    * fe_v[u_extractor].gradient(i, q)[0]   // ∂_x φ_i
-                    * JxW[q];
+                  const double du_n1 = fe_v[u_extractor].gradient(j, q) * b_vec;
+
+                  copy.cell_matrix(i, j) -=
+                    0.5 * u_old_q * fe_v[u_extractor].value(j, q) *
+                    fe_v[u_extractor].gradient(i, q) * b_vec * JxW[q];
                 }
               // Source contribution
               copy.cell_rhs(i) +=
@@ -344,37 +340,41 @@ namespace dealii
           const double bn =
             compute_tangent_normal_product_burger<dim, spacedim>(cell,
                                                                  normals[q]);
-
+          // Semi-implicit numerical flux: F̂ = {{u^n * u^{n+1}}} * bn + penalty
           for (unsigned int j = 0; j < nd; ++j)
             {
-              auto ul = fe_iv[u_extractor].value(0, j, q);
-              auto ur = fe_iv[u_extractor].value(1, j, q);
+              const double ul = fe_iv[u_extractor].value(0, j, q);
+              const double ur = fe_iv[u_extractor].value(1, j, q);
 
-              const double flux =
-                compute_burger_lax_friedrichs_flux<dim, spacedim>(
-                  uL_old[q], uR_old[q], ul, ur, bn);
+              // Average flux: {{u^n * u^{n+1}}}
+              const double F_avg =
+                0.25 * bn * (uL_old[q] * ul + uR_old[q] * ur);
+
+              const double h = cell->diameter();
+
+              const double alpha = theta * h / (2 * time_step);
 
               for (unsigned int i = 0; i < nd; ++i)
                 {
-                  face.cell_matrix(i, j) += 0.5*
-                    flux * fe_iv[u_extractor].jump_in_values(i, q) * JxW[q];
-
+                  // Flux term
                   face.cell_matrix(i, j) +=
-                    theta * fe_iv[u_extractor].jump_in_values(i, q) *
-                    fe_iv[u_extractor].jump_in_values(j, q) * JxW[q];
+                    F_avg * fe_iv[u_extractor].jump_in_values(i, q) * JxW[q];
+
+                  // Penalty/stabilization: alpha * [[u^{n+1}]] * [[phi]]
+                  face.cell_matrix(i, j) -=
+                    alpha * fe_iv[u_extractor].jump_in_values(j, q) *
+                    fe_iv[u_extractor].jump_in_values(i, q) * JxW[q];
                 }
             }
         }
     };
 
-    // Boundary worker: exterior flux with minus sign
     auto boundary_worker = [&](const Iterator                   &cell,
                                unsigned int                      face_no,
                                BurgerScratchData<dim, spacedim> &scratch,
                                BurgerCopyData                   &copy) {
       scratch.fe_interface_values.reinit(cell, face_no);
-      const auto &fe_face =
-      scratch.fe_interface_values.get_fe_face_values(0);
+      const auto &fe_face = scratch.fe_interface_values.get_fe_face_values(0);
 
       const auto        &JxW     = fe_face.get_JxW_values();
       const auto        &normals = fe_face.get_normal_vectors();
@@ -384,133 +384,53 @@ namespace dealii
       fe_face[u_extractor].get_function_values(solution_old, u_in);
 
       ExactSolutionBurger<spacedim> exact;
-      exact.set_time(time);
-
-      copy.cell_matrix.reinit(fe_face.get_fe().dofs_per_cell,
-                              fe_face.get_fe().dofs_per_cell);
-      copy.cell_rhs.reinit(fe_face.get_fe().dofs_per_cell);
-
+      ;
       for (unsigned int q = 0; q < n_q; ++q)
         {
           const double bn =
             compute_tangent_normal_product_burger<dim, spacedim>(cell,
                                                                  normals[q]);
-          const double u_ext_n = exact.value(fe_face.quadrature_point(q));
+          // Boundary data at t^n and t^{n+1}
+          exact.set_time(time - time_step); // t^n
+          const double u_ext_old = exact.value(fe_face.quadrature_point(q));
+
+          exact.set_time(time); // t^{n+1}
+          const double u_ext_new = exact.value(fe_face.quadrature_point(q));
+
+          const double h     = cell->diameter();
+          const double alpha = theta * h / (2 * time_step);
+
           for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
             {
-              auto ul = fe_face[u_extractor].value( j, q);
-              auto u_ext_n1 = exact.value(fe_face.quadrature_point(q));
-              const double flux =
-            compute_burger_lax_friedrichs_flux<dim, spacedim>(u_in[q],
-            u_ext_n, ul, u_ext_n1, bn);
+              const double u_in_new = fe_face[u_extractor].value(j, q);
 
-            //   for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
-            //     {
-                  // 
-                  copy.cell_rhs(j) -=
-                    flux * fe_face[u_extractor].value(j, q) * JxW[q];
+              for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+                {
+                  // Matrix contribution from boundary flux
+                  copy.cell_matrix(i, j) +=
+                    0.5 * (u_ext_old * bn) * fe_face[u_extractor].value(j, q) *
+                    fe_face[u_extractor].value(i, q) * JxW[q];
 
-                //   copy.cell_matrix(i, j) +=
-                //     theta * fe_face[u_extractor].jump_in_values(i, q) *
-                // //     fe_face[u_extractor].jump_in_values(j, q) * JxW[q];
-                // }
+                  copy.cell_matrix(i, j) -=
+                    alpha * fe_face[u_extractor].value(j, q) *
+                    fe_face[u_extractor].value(i, q) * JxW[q];
+                }
+
+              // Boundary flux: u_ext^n * u_in^{n+1} * bn
+              const double F_boundary = 0.5 * u_ext_old * u_in_new * bn;
+              // RHS contribution from boundary data
+              copy.cell_rhs(j) -= F_boundary // (0.5 * u_ext_old * u_ext_new *
+                                             // bn + alpha * u_ext_new)
+                                  * fe_face[u_extractor].value(j, q) * JxW[q];
             }
-
-
-    //     //   for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell;
-    //     ++i)
-    //     //    
-    //     //     copy.cell_rhs(i) -=
-    //          // flux * fe_face[u_extractor].value(i, q) * JxW[q];
-    //     }
-    // };
-
-    // // Boundary worker: Lax-Friedrichs flux with upwind direction
-    // auto boundary_worker = [&](const Iterator                   &cell,
-    //                            unsigned int                      face_no,
-    //                            BurgerScratchData<dim, spacedim> &scratch,
-    //                            BurgerCopyData                   &copy) {
-    //   scratch.fe_interface_values.reinit(cell, face_no);
-    //   const auto &fe_face = scratch.fe_interface_values.get_fe_face_values(0);
-
-    //   const auto        &JxW     = fe_face.get_JxW_values();
-    //   const auto        &normals = fe_face.get_normal_vectors();
-    //   const unsigned int n_q     = fe_face.n_quadrature_points;
-
-    //   // --- Time levels
-    //   // ---------------------------------------------------------
-    //   const double time_old = time - time_step; // t_n
-    //   const double time_new = time;             // t_{n+1}
-    //   // -------------------------------------------------------------------------
-
-    //   // Values of u^n on the interior (cell) side
-    //   std::vector<double> u_in(n_q);
-    //   fe_face[u_extractor].get_function_values(solution_old, u_in);
-
-    //   // Exact / Dirichlet boundary values at t_n and t_{n+1}
-    //   ExactSolutionBurger<spacedim> exact;
-    //   exact.set_time(time_old);
-    //   std::vector<double> u_ext_n(n_q);
-    //   for (unsigned int q = 0; q < n_q; ++q)
-    //     u_ext_n[q] = exact.value(fe_face.quadrature_point(q));
-
-    //   exact.set_time(time_new);
-    //   std::vector<double> u_ext_n1(n_q);
-    //   for (unsigned int q = 0; q < n_q; ++q)
-    //     u_ext_n1[q] = exact.value(fe_face.quadrature_point(q));
-
-    //   // Initialize local matrices and RHS
-    //   const unsigned int ndofs = fe_face.get_fe().dofs_per_cell;
-    //   copy.cell_matrix.reinit(ndofs, ndofs);
-    //   copy.cell_rhs.reinit(ndofs);
-
-    //   // --- Boundary flux loop
-    //   // --------------------------------------------------
-    //   for (unsigned int q = 0; q < n_q; ++q)
-    //     {
-    //       const double bn =
-    //         compute_tangent_normal_product_burger<dim, spacedim>(cell,
-    //                                                              normals[q]);
-    //       const double ul_n  = u_in[q];     // u_L^n
-    //       const double ur_n1 = u_ext_n1[q]; // Dirichlet boundary (u_R^{n+1})
-
-    //       // Physical Burgers flux function F(u) = 0.5 * u^2
-    //       auto F = [](double u) { return 0.5 * u * u; };
-
-    //       double flux_num = 0.0;
-
-    //       // --- FEniCS-like conditional directionality
-    //       // ---------------------------
-    //       if (ul_n * bn > 0.0)
-    //         {
-    //           // Outflow: take left (interior) state
-    //           flux_num = F(ul_n);
-    //         }
-    //       else
-    //         {
-    //           // Inflow: take exterior (boundary) state
-    //           flux_num = F(ur_n1);
-    //         }
-    //       // ----------------------------------------------------------------------
-
-    //       // Add stabilization (Lax-Friedrichs)
-    //       const double alpha = std::abs(bn);
-    //       flux_num += 0.5 * alpha * (ul_n - ur_n1);
-
-    //       // Apply boundary contribution (minus sign for exterior)
-    //       for (unsigned int j = 0; j < ndofs; ++j)
-    //         {
-    //           copy.cell_rhs(j) -=
-    //             flux_num * fe_face[u_extractor].value(j, q) * JxW[q];
-    //         }
-    //     }
-    // };
+        }
+    };
 
 
 
-    const QGauss<dim>                q_vol(fe->tensor_degree() + 1);
-    const QGauss<dim - 1>            q_face(fe->tensor_degree() + 1);
-    BurgerScratchData<dim, spacedim> scratch(*fe, q_vol, q_face);
+    const QGauss<dim>     quadrature(2 * fe->tensor_degree() + 1);
+    const QGauss<dim - 1> quadrature_face(2 * fe->tensor_degree() + 1);
+    BurgerScratchData<dim, spacedim> scratch(*fe, quadrature, quadrature_face);
     BurgerCopyData                   copy;
 
     const AffineConstraints<double> constraints;
@@ -610,7 +530,7 @@ namespace dealii
                                       solution,
                                       exact,
                                       diff,
-                                      QGauss<dim>(fe_degree + 3),
+                                      QGauss<dim>(fe_degree + 2),
                                       VectorTools::L2_norm);
     const double L2 = VectorTools::compute_global_error(triangulation,
                                                         diff,
@@ -621,7 +541,7 @@ namespace dealii
                                       solution,
                                       exact,
                                       diff,
-                                      QGauss<dim>(fe_degree + 3),
+                                      QGauss<dim>(fe_degree + 2),
                                       VectorTools::H1_seminorm);
     const double H1 =
       VectorTools::compute_global_error(triangulation,
@@ -671,7 +591,7 @@ namespace dealii
         ExactSolutionBurger<spacedim> init;
         init.set_time(0.0);
         VectorTools::project(
-          dof_handler, cstr, QGauss<dim>(fe_degree + 1), init, solution);
+          dof_handler, cstr, QGauss<dim>(fe_degree + 2), init, solution);
         solution_old = solution;
 
         // Time loop
@@ -692,7 +612,7 @@ namespace dealii
             // System: (M/dt) u^{n+1} = (M/dt) u^n + RHS
             system_matrix_time.copy_from(mass_matrix);
             system_matrix_time *= (1.0 / time_step);
-
+            system_matrix_time.add(1.0, system_matrix);
             mass_matrix.vmult(tmp_vector, solution_old);
             tmp_vector *= (1.0 / time_step);
             tmp_vector += right_hand_side;
@@ -703,7 +623,23 @@ namespace dealii
             solution_old = solution;
             output_results(step);
           }
-        std::cout << "  ||u||_2 = " << solution.l2_norm() << std::endl;
+        {
+          Vector<double> tmp(dof_handler.n_dofs());
+          mass_matrix.vmult(tmp, solution);    // tmp = M * solution
+          const double l2_sq = solution * tmp; // u^T M u
+          const double l2    = std::sqrt(std::max(0.0, l2_sq));
+
+          // For manufactured solution u = e^{-t} sin(πx), L2 norm is
+          // ||u||_{L2} = sqrt(int_{0}^}{1} sin^2 (pi x) e^{-2t})= sqrt(1/2) *
+          // e^{-t}
+          const double analytic_L2 = std::sqrt(0.5) * std::exp(-time);
+
+          std::cout << std::scientific << std::setprecision(6);
+          std::cout << "  ||u||_{L2} (discrete) = " << l2
+                    << "   analytic = " << analytic_L2 << "   rel_err = "
+                    << std::fabs(l2 - analytic_L2) / analytic_L2 << std::endl;
+        }
+
         compute_errors(cycle);
       }
   }

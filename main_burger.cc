@@ -1,12 +1,10 @@
-#include "include/burger_equation.h"
-
-
-
 #include <deal.II/base/logstream.h> // deallog control
 #include <deal.II/base/parameter_handler.h>
 
 #include <iostream>
 #include <stdexcept> // for std::invalid_argument
+
+#include "include/burger_equation.h"
 
 
 using namespace dealii;
