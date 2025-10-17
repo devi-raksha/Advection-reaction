@@ -296,15 +296,15 @@ namespace dealii
                   const double du_n1 = fe_v[u_extractor].gradient(j, q) * b_vec;
 
                   copy.cell_matrix(i, j) -=
-                    0.5 * u_old_q * fe_v[u_extractor].value(j, q) *
-                    fe_v[u_extractor].gradient(i, q) * b_vec * JxW[q];
+                    0.5 * u_old_q* b_vec* fe_v[u_extractor].value(j, q) *
+                    fe_v[u_extractor].gradient(i, q) * JxW[q];
                 }
               // Source contribution
               copy.cell_rhs(i) +=
                 rhs_value * fe_v[u_extractor].value(i, q) * JxW[q];
             }
         }
-    };
+    };  
 
     // Face worker: interior fluxes on RHS
     auto face_worker = [&](const Iterator                   &cell,
@@ -343,31 +343,32 @@ namespace dealii
           // Semi-implicit numerical flux: F̂ = {{u^n * u^{n+1}}} * bn + penalty
           for (unsigned int j = 0; j < nd; ++j)
             {
-              const double ul = fe_iv[u_extractor].value(0, j, q);
-              const double ur = fe_iv[u_extractor].value(1, j, q);
+              // const double ul = fe_iv[u_extractor].value(0, j, q);
+              // const double ur = fe_iv[u_extractor].value(1, j, q);
 
-              // Average flux: {{u^n * u^{n+1}}}
-              const double F_avg =
-                0.25 * bn * (uL_old[q] * ul + uR_old[q] * ur);
+              // // Average flux: {{u^n * u^{n+1}}}
+              // const double F_avg =
+              //   0.25 * bn * (uL_old[q] * ul + uR_old[q] * ur);
 
-              const double h = cell->diameter();
+              // const double h = cell->diameter();
 
-              const double alpha = theta * h / (2 * time_step);
+              // // const double alpha = theta * h / (2 * time_step);
 
               for (unsigned int i = 0; i < nd; ++i)
                 {
-                  // Flux term
-                  face.cell_matrix(i, j) +=
-                    F_avg * fe_iv[u_extractor].jump_in_values(i, q) * JxW[q];
-
-                  // Penalty/stabilization: alpha * [[u^{n+1}]] * [[phi]]
-                  face.cell_matrix(i, j) -=
-                    alpha * fe_iv[u_extractor].jump_in_values(j, q) *
-                    fe_iv[u_extractor].jump_in_values(i, q) * JxW[q];
+                 
+                  face.cell_matrix(i, j) += (bn* uL_old[q] /2
+                   * fe_iv[u_extractor].jump_in_values(i, q)
+                   * fe_iv[u_extractor].average_of_values(j,q)
+                   + theta * std::abs(bn*uL_old[q]/2)
+                    * fe_iv[u_extractor].jump_in_values(i, q)
+                    * fe_iv[u_extractor].jump_in_values(j, q))
+                   * JxW[q];
                 }
             }
         }
     };
+
 
     auto boundary_worker = [&](const Iterator                   &cell,
                                unsigned int                      face_no,
@@ -383,50 +384,43 @@ namespace dealii
       std::vector<double> u_in(n_q);
       fe_face[u_extractor].get_function_values(solution_old, u_in);
 
-      ExactSolutionBurger<spacedim> exact;
-      ;
+      std::vector<Point<spacedim>> q_points(n_q);
       for (unsigned int q = 0; q < n_q; ++q)
         {
           const double bn =
             compute_tangent_normal_product_burger<dim, spacedim>(cell,
                                                                  normals[q]);
+
+
+            q_points[q] = fe_face.quadrature_point(q);  // or get_quadrature_points()
+            std::vector<double> g(n_q);
+
+             ExactSolutionBurger<spacedim> exact;
+             exact.set_time(time);
+             exact.value_list(q_points, g);    
+
           // Boundary data at t^n and t^{n+1}
           exact.set_time(time - time_step); // t^n
           const double u_ext_old = exact.value(fe_face.quadrature_point(q));
 
-          exact.set_time(time); // t^{n+1}
-          const double u_ext_new = exact.value(fe_face.quadrature_point(q));
-
-          const double h     = cell->diameter();
-          const double alpha = theta * h / (2 * time_step);
-
-          for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
-            {
-              const double u_in_new = fe_face[u_extractor].value(j, q);
-
-              for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
-                {
-                  // Matrix contribution from boundary flux
-                  copy.cell_matrix(i, j) +=
-                    0.5 * (u_ext_old * bn) * fe_face[u_extractor].value(j, q) *
-                    fe_face[u_extractor].value(i, q) * JxW[q];
-
-                  copy.cell_matrix(i, j) -=
-                    alpha * fe_face[u_extractor].value(j, q) *
-                    fe_face[u_extractor].value(i, q) * JxW[q];
-                }
-
-              // Boundary flux: u_ext^n * u_in^{n+1} * bn
-              const double F_boundary = 0.5 * u_ext_old * u_in_new * bn;
-              // RHS contribution from boundary data
-              copy.cell_rhs(j) -= F_boundary // (0.5 * u_ext_old * u_ext_new *
-                                             // bn + alpha * u_ext_new)
-                                  * fe_face[u_extractor].value(j, q) * JxW[q];
-            }
+          if (bn *(u_ext_old/2) > 0)
+          {
+            for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+              for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
+                copy.cell_matrix(i, j) +=
+                  fe_face[u_extractor].value(i, q)     // \phi_i
+                  * fe_face[u_extractor].value(j, q)  // \phi_j
+                  * bn*u_ext_old/2              // \beta . n = bn u_old/2
+                  * JxW[q];                   // dx
+          }
+          else
+          for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+            copy.cell_rhs(i) += -fe_face[u_extractor].value(i, q) // \phi_i
+                                     * g[q]                     // g*/
+                                     * bn* u_ext_old/2                    // \beta . n
+                                     * JxW[q]; // dx
         }
-    };
-
-
+      };                                          
 
     const QGauss<dim>     quadrature(2 * fe->tensor_degree() + 1);
     const QGauss<dim - 1> quadrature_face(2 * fe->tensor_degree() + 1);
@@ -508,12 +502,10 @@ namespace dealii
                              interp);
     data_out.build_patches();
     data_out.write_vtu(output);
-
-
-    static std::vector<std::pair<double, std::string>> pvd;
-    pvd.emplace_back(time, filename);
-    std::ofstream pvd_out(output_filename + ".pvd");
-    DataOutBase::write_pvd_record(pvd_out, pvd);
+    static std::vector<std::pair<double, std::string>> pvd_output_records;
+    pvd_output_records.push_back(std::make_pair(time, filename));
+    std::ofstream pvd_output(output_filename + ".pvd");
+    DataOutBase::write_pvd_record(pvd_output, pvd_output_records);
   }
 
   template <int dim, int spacedim>
