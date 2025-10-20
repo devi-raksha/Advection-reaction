@@ -57,8 +57,7 @@ namespace dealii
     const double x = p[0];
     const double t = this->get_time();
 
-    // u = e^{-t} sin(πx)
-    const double u = std::exp(-t) * std::sin(numbers::PI * x);
+    // u_exact = e^{-t} sin(πx)
     // u_t = -e^{-t} sin(πx)
     const double u_t = -std::exp(-t) * std::sin(numbers::PI * x);
     // ∇·(u²/2) = d/dx(u²/2) = u * du/dx = e^{-t} sin(πx) * e^{-t} π cos(πx) =
@@ -268,10 +267,13 @@ namespace dealii
 
       // Evaluate u^n at quadrature points
       std::vector<double> u_old(fe_v.n_quadrature_points);
-      fe_v[u_extractor].get_function_values(solution_old, u_old);
+      // fe_v[u_extractor].get_function_values(solution_old, u_old);
+      fe_v[u_extractor].get_function_values(solution, u_old);
 
       std::vector<Tensor<1, spacedim>> grad_uold(fe_v.n_quadrature_points);
-      fe_v[u_extractor].get_function_gradients(solution_old, grad_uold);
+      // fe_v[u_extractor].get_function_gradients(solution_old, grad_uold);
+      fe_v[u_extractor].get_function_gradients(solution, grad_uold);
+
 
       // Unit tangent vector along the embedded 1D edge
       const auto b_vec = (cell->vertex(1) - cell->vertex(0)) /
@@ -284,19 +286,13 @@ namespace dealii
         {
           const double rhs_value = rhs_function->value(q_points[q]);
           const double u_old_q   = u_old[q];
-          const double du_n      = grad_uold[q] * b_vec;
-
-          const double h   = cell->diameter();
-          const double eta = std::pow(h, theta);
 
           for (unsigned int i = 0; i < ndofs; ++i)
             {
               for (unsigned int j = 0; j < ndofs; ++j)
                 {
-                  const double du_n1 = fe_v[u_extractor].gradient(j, q) * b_vec;
-
                   copy.cell_matrix(i, j) -=
-                    0.5 * u_old_q* b_vec* fe_v[u_extractor].value(j, q) *
+                    0.5 * u_old_q * b_vec * fe_v[u_extractor].value(j, q) *
                     fe_v[u_extractor].gradient(i, q) * JxW[q];
                 }
               // Source contribution
@@ -304,7 +300,7 @@ namespace dealii
                 rhs_value * fe_v[u_extractor].value(i, q) * JxW[q];
             }
         }
-    };  
+    };
 
     // Face worker: interior fluxes on RHS
     auto face_worker = [&](const Iterator                   &cell,
@@ -323,11 +319,14 @@ namespace dealii
       const unsigned int n_q = fe_iv.get_fe_face_values(0).n_quadrature_points;
 
       std::vector<double> uL_old(n_q), uR_old(n_q);
-      fe_iv.get_fe_face_values(0)[u_extractor].get_function_values(solution_old,
+      // fe_iv.get_fe_face_values(0)[u_extractor].get_function_values(solution_old,
+      //                                                              uL_old);
+      // fe_iv.get_fe_face_values(1)[u_extractor].get_function_values(solution_old,
+      //                                                              uR_old);
+      fe_iv.get_fe_face_values(0)[u_extractor].get_function_values(solution,
                                                                    uL_old);
-      fe_iv.get_fe_face_values(1)[u_extractor].get_function_values(solution_old,
+      fe_iv.get_fe_face_values(1)[u_extractor].get_function_values(solution,
                                                                    uR_old);
-
       copy.face_data.emplace_back();
       auto              &face = copy.face_data.back();
       const unsigned int nd   = fe_iv.n_current_interface_dofs();
@@ -356,14 +355,14 @@ namespace dealii
 
               for (unsigned int i = 0; i < nd; ++i)
                 {
-                 
-                  face.cell_matrix(i, j) += (bn* (uL_old[q] + uR_old[q]) /4
-                   * fe_iv[u_extractor].jump_in_values(i, q)
-                   * fe_iv[u_extractor].average_of_values(j,q)
-                   + theta * std::abs(bn*(uL_old[q] + uR_old[q]) /4)
-                    * fe_iv[u_extractor].jump_in_values(i, q)
-                    * fe_iv[u_extractor].jump_in_values(j, q))
-                   * JxW[q];
+                  face.cell_matrix(i, j) +=
+                    (bn * (uL_old[q] + uR_old[q]) / 4 *
+                       fe_iv[u_extractor].jump_in_values(i, q) *
+                       fe_iv[u_extractor].average_of_values(j, q) +
+                     theta * std::abs(bn * (uL_old[q] + uR_old[q]) / 4) *
+                       fe_iv[u_extractor].jump_in_values(i, q) *
+                       fe_iv[u_extractor].jump_in_values(j, q)) *
+                    JxW[q];
                 }
             }
         }
@@ -382,7 +381,9 @@ namespace dealii
       const unsigned int n_q     = fe_face.n_quadrature_points;
 
       std::vector<double> u_in(n_q);
-      fe_face[u_extractor].get_function_values(solution_old, u_in);
+      // fe_face[u_extractor].get_function_values(solution_old, u_in);
+      fe_face[u_extractor].get_function_values(solution, u_in);
+
 
       std::vector<Point<spacedim>> q_points(n_q);
       for (unsigned int q = 0; q < n_q; ++q)
@@ -392,37 +393,38 @@ namespace dealii
                                                                  normals[q]);
 
 
-            q_points[q] = fe_face.quadrature_point(q);  // or get_quadrature_points()
-            std::vector<double> g(n_q);
-            // std::vector<double> g1(n_q);
+          q_points[q] =
+            fe_face.quadrature_point(q); // or get_quadrature_points()
+          std::vector<double> g(n_q);
+          // std::vector<double> g1(n_q);
 
-             ExactSolutionBurger<spacedim> exact;
-             exact.set_time(time);
-             exact.value_list(q_points, g);    
+          ExactSolutionBurger<spacedim> exact;
+          exact.set_time(time);
+          exact.value_list(q_points, g);
 
           // Boundary data at t^n and t^{n+1}
           exact.set_time(time - time_step); // t^n
           const double u_ext_old = exact.value(fe_face.quadrature_point(q));
-          exact.value_list(q_points, g1);  
 
-          if (bn *(u_ext_old/2) > 0)
-          {
-            for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
-              for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell; ++j)
-                copy.cell_matrix(i, j) +=
-                  fe_face[u_extractor].value(i, q)     // \phi_i
-                  * fe_face[u_extractor].value(j, q)  // \phi_j
-                  * bn*u_ext_old/2              // \beta . n = bn u_old/2
-                  * JxW[q];                   // dx
-          }
+          if (bn * (u_ext_old / 2) > 0)
+            {
+              for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+                for (unsigned int j = 0; j < fe_face.get_fe().dofs_per_cell;
+                     ++j)
+                  copy.cell_matrix(i, j) +=
+                    fe_face[u_extractor].value(i, q)   // \phi_i
+                    * fe_face[u_extractor].value(j, q) // \phi_j
+                    * bn * u_ext_old / 2               // \beta . n = bn u_old/2
+                    * JxW[q];                          // dx
+            }
           else
-          for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
-            copy.cell_rhs(i) += -fe_face[u_extractor].value(i, q) // \phi_i
-                                     * g[q]                     // g*/
-                                     * bn* u_ext_old/2  // g1[q]/2                   // \beta . n
-                                     * JxW[q]; // dx
+            for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
+              copy.cell_rhs(i) += -fe_face[u_extractor].value(i, q) // \phi_i
+                                  * g[q]                            // g*/
+                                  * bn * u_ext_old / 2 // g1[q]/2 // \beta . n
+                                  * JxW[q];            // dx
         }
-      };                                          
+    };
 
     const QGauss<dim>     quadrature(2 * fe->tensor_degree() + 1);
     const QGauss<dim - 1> quadrature_face(2 * fe->tensor_degree() + 1);
@@ -599,21 +601,52 @@ namespace dealii
             time += time_step;
             std::cout << "Step " << step << "  t=" << time << std::endl;
 
-            // Assemble fluxes and RHS (explicit/semi-implicit on faces)
+            // Initialize Picard iteration
+            solution = solution_old; // u^(0) := u^n
+            Vector<double> solution_picard_old(solution.size());
+            unsigned int   picard_iter = 0;
+            bool           converged   = false;
 
-            assemble_system();
+            // Picard loop
+            do
+              {
+                solution_picard_old = solution; // save previous iterate
 
-            // System: (M/dt) u^{n+1} = (M/dt) u^n + RHS
-            system_matrix_time.copy_from(mass_matrix);
-            system_matrix_time *= (1.0 / time_step);
-            system_matrix_time.add(1.0, system_matrix);
-            mass_matrix.vmult(tmp_vector, solution_old);
-            tmp_vector *= (1.0 / time_step);
-            tmp_vector += right_hand_side;
+                // Assemble using current Picard guess
+                assemble_system(); // uses solution as u_old
 
-            // Solve
-            solve();
+                // Build time-step system: (M/dt + A) u = M/dt u^n + RHS
+                system_matrix_time.copy_from(mass_matrix);
+                system_matrix_time *= (1.0 / time_step);
+                system_matrix_time.add(1.0, system_matrix);
 
+                mass_matrix.vmult(tmp_vector, solution_old);
+                tmp_vector *= (1.0 / time_step);
+                tmp_vector += right_hand_side;
+
+                // Solve linear system for new iterate
+                solve(); // result in 'solution'
+
+                // Compute Picard residual
+                Vector<double> diff = solution;
+                diff.add(-1.0, solution_picard_old);
+                const double picard_residual = diff.l2_norm();
+
+                std::cout << "  Picard iter " << picard_iter
+                          << "   residual = " << picard_residual << std::endl;                         
+
+                ++picard_iter;
+                
+                if (picard_residual < picard_tolerance ||
+                    picard_iter >= max_picard_iterations)
+                  converged = true;
+              }
+            while (!converged && picard_iter < max_picard_iterations);
+                        std::cout << "  Picard converged in "
+                      << picard_iter << " iterations.\n";
+
+
+            // Advance in time
             solution_old = solution;
             output_results(step);
           }
@@ -637,7 +670,6 @@ namespace dealii
         compute_errors(cycle);
       }
   }
-
   // Explicit instantiations: 1D embedded in 3D
   template class BurgerEquation<1, 3>;
   template class ExactSolutionBurger<3>;

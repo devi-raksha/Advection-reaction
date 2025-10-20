@@ -171,6 +171,10 @@ namespace dealii
     double       time                 = 0.0;
     unsigned int n_time_steps         = 0;
 
+    // Picard iteration parameters
+    const unsigned int max_picard_iterations = 10;
+    const double       picard_tolerance      = 1e-8;
+
     // Function parsers
     FunctionParser<spacedim> initial_condition;
     std::string              initial_expression = "sin(pi*x)";
