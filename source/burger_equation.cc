@@ -357,10 +357,10 @@ namespace dealii
               for (unsigned int i = 0; i < nd; ++i)
                 {
                  
-                  face.cell_matrix(i, j) += (bn* uL_old[q] /2
+                  face.cell_matrix(i, j) += (bn* (uL_old[q] + uR_old[q]) /4
                    * fe_iv[u_extractor].jump_in_values(i, q)
                    * fe_iv[u_extractor].average_of_values(j,q)
-                   + theta * std::abs(bn*uL_old[q]/2)
+                   + theta * std::abs(bn*(uL_old[q] + uR_old[q]) /4)
                     * fe_iv[u_extractor].jump_in_values(i, q)
                     * fe_iv[u_extractor].jump_in_values(j, q))
                    * JxW[q];
@@ -394,6 +394,7 @@ namespace dealii
 
             q_points[q] = fe_face.quadrature_point(q);  // or get_quadrature_points()
             std::vector<double> g(n_q);
+            // std::vector<double> g1(n_q);
 
              ExactSolutionBurger<spacedim> exact;
              exact.set_time(time);
@@ -402,6 +403,7 @@ namespace dealii
           // Boundary data at t^n and t^{n+1}
           exact.set_time(time - time_step); // t^n
           const double u_ext_old = exact.value(fe_face.quadrature_point(q));
+          exact.value_list(q_points, g1);  
 
           if (bn *(u_ext_old/2) > 0)
           {
@@ -417,7 +419,7 @@ namespace dealii
           for (unsigned int i = 0; i < fe_face.get_fe().dofs_per_cell; ++i)
             copy.cell_rhs(i) += -fe_face[u_extractor].value(i, q) // \phi_i
                                      * g[q]                     // g*/
-                                     * bn* u_ext_old/2                    // \beta . n
+                                     * bn* u_ext_old/2  // g1[q]/2                   // \beta . n
                                      * JxW[q]; // dx
         }
       };                                          
