@@ -148,6 +148,7 @@ namespace dealii
     add_parameter("Time step", time_step);
     add_parameter("Final time", final_time);
     add_parameter("Theta (penalty parameter)", theta);
+    add_parameter("Omega (relaxation parameter)", omega);
   }
 
   template <int dim, int spacedim>
@@ -627,23 +628,26 @@ namespace dealii
                 // Solve linear system for new iterate
                 solve(); // result in 'solution'
 
+                // solution = omega * solution_new + (1 - omega) * old
+                solution.sadd(omega, 1.0 - omega, solution_picard_old);
+
                 // Compute Picard residual
                 Vector<double> diff = solution;
                 diff.add(-1.0, solution_picard_old);
                 const double picard_residual = diff.l2_norm();
 
                 std::cout << "  Picard iter " << picard_iter
-                          << "   residual = " << picard_residual << std::endl;                         
+                          << "   residual = " << picard_residual << std::endl;
 
                 ++picard_iter;
-                
+
                 if (picard_residual < picard_tolerance ||
                     picard_iter >= max_picard_iterations)
                   converged = true;
               }
             while (!converged && picard_iter < max_picard_iterations);
-                        std::cout << "  Picard converged in "
-                      << picard_iter << " iterations.\n";
+            std::cout << "  Picard converged in " << picard_iter
+                      << " iterations.\n";
 
 
             // Advance in time

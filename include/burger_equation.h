@@ -168,6 +168,7 @@ namespace dealii
     double       time_step            = 0.01;
     double       final_time           = 1.0;
     double       theta                = 1.0; // penalty parameter
+    double       omega                = 1.0; // relaxation parameter
     double       time                 = 0.0;
     unsigned int n_time_steps         = 0;
 
