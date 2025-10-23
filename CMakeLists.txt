@@ -31,6 +31,7 @@
 SET(TARGET1 "DG_advection_reaction_estimator")
 SET(TARGET2 "blood_flow_system_updated_1d3d")
 SET(TARGET3 "burger_equation")
+SET(TARGET4 "burger_with_periodic_bc")
 
 # Declare all source files for each target:
 SET(TARGET1_SRC
@@ -45,6 +46,11 @@ set(TARGET2_SRC
 
 set(TARGET3_SRC
   source/burger_equation.cc
+  main_burger.cc
+)
+
+set(TARGET4_SRC
+  source/burger_with_periodic_bc.cc
   main_burger.cc
 )
 
@@ -74,6 +80,9 @@ DEAL_II_SETUP_TARGET(${TARGET2})
 
 ADD_EXECUTABLE(${TARGET3} ${TARGET3_SRC})
 DEAL_II_SETUP_TARGET(${TARGET3})
+
+ADD_EXECUTABLE(${TARGET4} ${TARGET4_SRC})
+DEAL_II_SETUP_TARGET(${TARGET4})
 
 # Add tests
 ADD_SUBDIRECTORY(tests)
