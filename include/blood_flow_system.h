@@ -245,6 +245,8 @@ private:
     double R1, R2, C, P_out;
   };
   std::map<unsigned int, RCRPhysics>   rcr_map;
+  std::map<unsigned int, unsigned int> vid_to_rcr_vertex;     // key = vessel id
+   // key = vessel id
   std::map<types::boundary_id, double> terminal_Pc_storage;
   std::set<types::boundary_id>         terminal_boundary_ids;
 
@@ -284,6 +286,21 @@ private:
   types::global_dof_index n_cell_dofs  = 0;
   types::global_dof_index n_trace_dofs = 0;
   types::global_dof_index n_total_dofs = 0;
+
+  // Capacitor pressures as differential DAE unknowns(one per RCR terminal with
+  // C > 0)
+
+  std::map<types::boundary_id, types::global_dof_index> rcr_pc_dof;
+  types::global_dof_index n_rcr_dofs  = 0;
+  types::global_dof_index n_trace_end = 0; // = n_cell_dofs + n_trace_dofs
+  void
+  build_rcr_dof_map();
+  void
+  assemble_rcr_capacitor_equations(const Vector<double> &y,
+                                   const Vector<double> &ydot,
+                                   Vector<double>       &F);
+  void
+  assemble_jacobian_rcr_capacitor_block(const Vector<double> &y);
 
   // -----------------------------------------------------------------------
   // Junction detection
@@ -366,10 +383,13 @@ private:
 
   mutable TimerOutput computing_timer;
 
-  // CSV timeseries output
-  std::ofstream                                         csv_P_, csv_Q_;
-  std::vector<std::pair<unsigned int, Point<spacedim>>> probe_targets_;
 
+  // CSV timeseries output for each vessel
+  std::map<unsigned int, std::ofstream> csv_vessel_;
+  std::vector<
+    std::pair<unsigned int,
+              typename DoFHandler<dim, spacedim>::active_cell_iterator>>
+    probe_targets_;
   void
   open_csv_files();
   void
