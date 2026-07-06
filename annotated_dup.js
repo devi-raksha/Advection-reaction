@@ -12,6 +12,5 @@ var annotated_dup =
     [ "JunctionFace", "structJunctionFace.html", "structJunctionFace" ],
     [ "JunctionInfo", "structJunctionInfo.html", "structJunctionInfo" ],
     [ "JunctionSolver", "classJunctionSolver.html", "classJunctionSolver" ],
-    [ "JunctionState", "structJunctionState.html", "structJunctionState" ],
-    [ "ProbeSpec", "structProbeSpec.html", "structProbeSpec" ]
+    [ "JunctionState", "structJunctionState.html", "structJunctionState" ]
 ];

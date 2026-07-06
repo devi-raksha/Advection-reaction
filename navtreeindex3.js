@@ -1,5 +1,8 @@
 var NAVTREEINDEX3 =
 {
+"namespaceDoFTools_1_1internal_1_1Assembler.html":[1,0,23,0,0],
+"namespaceDynamicSparsityPatternIterators.html":[1,0,24],
+"namespaceDynamicSparsityPatternIterators.html#a55d4a609ddf51cf0645ddeeb04ae8168":[1,0,24,0],
 "namespaceEvaluationFlags.html":[1,0,25],
 "namespaceEvaluationFlags.html#a13a274365d8897d39017c341dce13cde":[1,0,25,3],
 "namespaceEvaluationFlags.html#a9b7c6d689cb76386839d0d13640f59ae":[1,0,25,0],
@@ -246,8 +249,5 @@ var NAVTREEINDEX3 =
 "namespaceGridTools.html#a6ea9a503f365395ed24460cb489d7f0e":[1,0,44,90],
 "namespaceGridTools.html#a6f2f6dd5b219c63b165c787db310c8d9":[1,0,44,89],
 "namespaceGridTools.html#a70d37431a097d36fb7152c41e0352b5e":[1,0,44,106],
-"namespaceGridTools.html#a72956e32f5a1091a6c8731b545e7fcbf":[1,0,44,109],
-"namespaceGridTools.html#a79820d66b08b06e94541817ba78d6213":[1,0,44,36],
-"namespaceGridTools.html#a7aa43a04be3a5c60340749e57fe94050":[1,0,44,68],
-"namespaceGridTools.html#a7f6d5b53684824212c789514167fd326":[1,0,44,27]
+"namespaceGridTools.html#a72956e32f5a1091a6c8731b545e7fcbf":[1,0,44,109]
 };

@@ -1,5 +1,8 @@
 var NAVTREEINDEX2 =
 {
+"namespaceCGALWrappers_1_1internal.html#a19f9f3e6cb3dcb7da476f20507cb6d95":[1,0,8,0,10],
+"namespaceCGALWrappers_1_1internal.html#a20f9a8bbd2fa5e63a0e718fda9330774":[1,0,8,0,3],
+"namespaceCGALWrappers_1_1internal.html#a45904e15448af61089d34d6f404fea6e":[1,0,8,0,2],
 "namespaceCGALWrappers_1_1internal.html#a657caa4336a2db451dfc93e47beb4bd6":[1,0,8,0,11],
 "namespaceCGALWrappers_1_1internal.html#a7534879fca3b0753c5364549e026e72d":[1,0,8,0,6],
 "namespaceCGALWrappers_1_1internal.html#a9348ade403cb390d6f8d3729fa6943f8":[1,0,8,0,5],
@@ -246,8 +249,5 @@ var NAVTREEINDEX2 =
 "namespaceDoFTools_1_1internal.html#ad2ef140f5d6f248aa4eebdac221fa94c":[1,0,23,0,13],
 "namespaceDoFTools_1_1internal.html#ae01a54c56148d8c0fa3bc4789348e599":[1,0,23,0,3],
 "namespaceDoFTools_1_1internal.html#aefcb004ed33058d0aedcd64af08a9112":[1,0,23,0,14],
-"namespaceDoFTools_1_1internal.html#af539027bba9331145773d7340eb6ad2e":[1,0,23,0,2],
-"namespaceDoFTools_1_1internal_1_1Assembler.html":[1,0,23,0,0],
-"namespaceDynamicSparsityPatternIterators.html":[1,0,24],
-"namespaceDynamicSparsityPatternIterators.html#a55d4a609ddf51cf0645ddeeb04ae8168":[1,0,24,0]
+"namespaceDoFTools_1_1internal.html#af539027bba9331145773d7340eb6ad2e":[1,0,23,0,2]
 };

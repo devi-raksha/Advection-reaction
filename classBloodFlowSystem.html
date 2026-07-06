@@ -172,6 +172,9 @@ Public Member Functions</h2></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pri-methods" class="groupheader"><a id="pri-methods" name="pri-methods"></a>
 Private Member Functions</h2></td></tr>
+<tr class="memitem:a16ee4182ea5f7653b2f7954ff279f283" id="r_a16ee4182ea5f7653b2f7954ff279f283"><td class="memItemLeft">void&#160;</td><td class="memItemRight"><a class="el" href="#a16ee4182ea5f7653b2f7954ff279f283">build_rcr_dof_map</a> ()</td></tr>
+<tr class="memitem:ae4223282bb949012b08bc2294d97365b" id="r_ae4223282bb949012b08bc2294d97365b"><td class="memItemLeft">void&#160;</td><td class="memItemRight"><a class="el" href="#ae4223282bb949012b08bc2294d97365b">assemble_rcr_capacitor_equations</a> (const <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt; &amp;y, const <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt; &amp;ydot, <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt; &amp;F)</td></tr>
+<tr class="memitem:a46f71eb15e4398a8c1dafd916205defd" id="r_a46f71eb15e4398a8c1dafd916205defd"><td class="memItemLeft">void&#160;</td><td class="memItemRight"><a class="el" href="#a46f71eb15e4398a8c1dafd916205defd">assemble_jacobian_rcr_capacitor_block</a> (const <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt; &amp;y)</td></tr>
 <tr class="memitem:ad2fc937ec1f97bbd5e94d5b49753ac2c" id="r_ad2fc937ec1f97bbd5e94d5b49753ac2c"><td class="memItemLeft">void&#160;</td><td class="memItemRight"><a class="el" href="#ad2fc937ec1f97bbd5e94d5b49753ac2c">open_csv_files</a> ()</td></tr>
 <tr class="memitem:a787de19882963d643572f8fe8459ca21" id="r_a787de19882963d643572f8fe8459ca21"><td class="memItemLeft">void&#160;</td><td class="memItemRight"><a class="el" href="#a787de19882963d643572f8fe8459ca21">write_csv_row</a> (const double t, const <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt; &amp;sol)</td></tr>
 <tr class="memitem:a125f7d85e7d577b0e7c47eacef92019b" id="r_a125f7d85e7d577b0e7c47eacef92019b"><td class="memItemLeft">void&#160;</td><td class="memItemRight"><a class="el" href="#a125f7d85e7d577b0e7c47eacef92019b">close_csv_files</a> ()</td></tr>
@@ -227,6 +230,7 @@ Private Attributes</h2></td></tr>
 <tr class="memitem:ac6f4fcea862aebcac049ad7a0ffbd68c" id="r_ac6f4fcea862aebcac049ad7a0ffbd68c"><td class="memItemLeft">double&#160;</td><td class="memItemRight"><a class="el" href="#ac6f4fcea862aebcac049ad7a0ffbd68c">last_rcr_dt</a> = 0.0</td></tr>
 <tr class="memitem:a7dfc25c89636c01afaa9464bb52d02c7" id="r_a7dfc25c89636c01afaa9464bb52d02c7"><td class="memItemLeft">std::map&lt; unsigned int, <a class="el" href="structBloodFlowSystem_1_1VesselPhysicalProperties.html">VesselPhysicalProperties</a> &gt;&#160;</td><td class="memItemRight"><a class="el" href="#a7dfc25c89636c01afaa9464bb52d02c7">vessel_map</a></td></tr>
 <tr class="memitem:af21218bb58ce3b012035c47174ecb07f" id="r_af21218bb58ce3b012035c47174ecb07f"><td class="memItemLeft">std::map&lt; unsigned int, <a class="el" href="structBloodFlowSystem_1_1RCRPhysics.html">RCRPhysics</a> &gt;&#160;</td><td class="memItemRight"><a class="el" href="#af21218bb58ce3b012035c47174ecb07f">rcr_map</a></td></tr>
+<tr class="memitem:ad2412109eef1e252bc57e1fe74c7cc6e" id="r_ad2412109eef1e252bc57e1fe74c7cc6e"><td class="memItemLeft">std::map&lt; unsigned int, unsigned int &gt;&#160;</td><td class="memItemRight"><a class="el" href="#ad2412109eef1e252bc57e1fe74c7cc6e">vid_to_rcr_vertex</a></td></tr>
 <tr class="memitem:aa6e728f176e9e3fcb6c4dd7764807319" id="r_aa6e728f176e9e3fcb6c4dd7764807319"><td class="memItemLeft">std::map&lt; <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#aed8813fee8c8a2edcc6005e6a48c321a">types::boundary_id</a>, double &gt;&#160;</td><td class="memItemRight"><a class="el" href="#aa6e728f176e9e3fcb6c4dd7764807319">terminal_Pc_storage</a></td></tr>
 <tr class="memitem:a9dbb0fa2189dfce89775f81e7d802c08" id="r_a9dbb0fa2189dfce89775f81e7d802c08"><td class="memItemLeft">std::set&lt; <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#aed8813fee8c8a2edcc6005e6a48c321a">types::boundary_id</a> &gt;&#160;</td><td class="memItemRight"><a class="el" href="#a9dbb0fa2189dfce89775f81e7d802c08">terminal_boundary_ids</a></td></tr>
 <tr class="memitem:adcf106f564b665c2df23a10f2b25d814" id="r_adcf106f564b665c2df23a10f2b25d814"><td class="memItemLeft"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt;&#160;</td><td class="memItemRight"><a class="el" href="#adcf106f564b665c2df23a10f2b25d814">cell_vessel_ids</a></td></tr>
@@ -252,6 +256,9 @@ Private Attributes</h2></td></tr>
 <tr class="memitem:aff75eca40a714416db50fd1f5a31bfc7" id="r_aff75eca40a714416db50fd1f5a31bfc7"><td class="memItemLeft"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#a3543786f7dc7c57385fc923a6afd5917">types::global_dof_index</a>&#160;</td><td class="memItemRight"><a class="el" href="#aff75eca40a714416db50fd1f5a31bfc7">n_cell_dofs</a> = 0</td></tr>
 <tr class="memitem:adeb1509407e080160e20dbad216d2c45" id="r_adeb1509407e080160e20dbad216d2c45"><td class="memItemLeft"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#a3543786f7dc7c57385fc923a6afd5917">types::global_dof_index</a>&#160;</td><td class="memItemRight"><a class="el" href="#adeb1509407e080160e20dbad216d2c45">n_trace_dofs</a> = 0</td></tr>
 <tr class="memitem:a536c8cb6d64733a34862c1ef7eee18b3" id="r_a536c8cb6d64733a34862c1ef7eee18b3"><td class="memItemLeft"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#a3543786f7dc7c57385fc923a6afd5917">types::global_dof_index</a>&#160;</td><td class="memItemRight"><a class="el" href="#a536c8cb6d64733a34862c1ef7eee18b3">n_total_dofs</a> = 0</td></tr>
+<tr class="memitem:a65972c95c023f5720b2aeb4e78127501" id="r_a65972c95c023f5720b2aeb4e78127501"><td class="memItemLeft">std::map&lt; <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#aed8813fee8c8a2edcc6005e6a48c321a">types::boundary_id</a>, <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#a3543786f7dc7c57385fc923a6afd5917">types::global_dof_index</a> &gt;&#160;</td><td class="memItemRight"><a class="el" href="#a65972c95c023f5720b2aeb4e78127501">rcr_pc_dof</a></td></tr>
+<tr class="memitem:ac52c8d84bda196e621899765360067c4" id="r_ac52c8d84bda196e621899765360067c4"><td class="memItemLeft"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#a3543786f7dc7c57385fc923a6afd5917">types::global_dof_index</a>&#160;</td><td class="memItemRight"><a class="el" href="#ac52c8d84bda196e621899765360067c4">n_rcr_dofs</a> = 0</td></tr>
+<tr class="memitem:a75f235284571c1b70197af2c3970f3dd" id="r_a75f235284571c1b70197af2c3970f3dd"><td class="memItemLeft"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#a3543786f7dc7c57385fc923a6afd5917">types::global_dof_index</a>&#160;</td><td class="memItemRight"><a class="el" href="#a75f235284571c1b70197af2c3970f3dd">n_trace_end</a> = 0</td></tr>
 <tr class="memitem:adc56c3cc13ef8b3d94780e2f2fb271a4" id="r_adc56c3cc13ef8b3d94780e2f2fb271a4"><td class="memItemLeft">std::vector&lt; <a class="el" href="structJunctionInfo.html">JunctionInfo</a> &gt;&#160;</td><td class="memItemRight"><a class="el" href="#adc56c3cc13ef8b3d94780e2f2fb271a4">junctions</a></td></tr>
 <tr class="memitem:ab00cf28e70af4f3ab10015fb83cca0d5" id="r_ab00cf28e70af4f3ab10015fb83cca0d5"><td class="memItemLeft">std::set&lt; std::pair&lt; <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classCellId.html">CellId</a>, unsigned int &gt; &gt;&#160;</td><td class="memItemRight"><a class="el" href="#ab00cf28e70af4f3ab10015fb83cca0d5">all_junction_faces</a></td></tr>
 <tr class="memitem:aca401eacd73012cc6966d8d71d45cdbc" id="r_aca401eacd73012cc6966d8d71d45cdbc"><td class="memItemLeft"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classSparsityPattern.html">SparsityPattern</a>&#160;</td><td class="memItemRight"><a class="el" href="#aca401eacd73012cc6966d8d71d45cdbc">sparsity_pattern</a></td></tr>
@@ -286,9 +293,8 @@ Private Attributes</h2></td></tr>
 <tr class="memitem:a40ddb8b749785c899acdb1e2a5cb84c6" id="r_a40ddb8b749785c899acdb1e2a5cb84c6"><td class="memItemLeft"><a class="el" href="classParsedTools_1_1Function.html">ParsedTools::Function</a>&lt; spacedim &gt;&#160;</td><td class="memItemRight"><a class="el" href="#a40ddb8b749785c899acdb1e2a5cb84c6">exact_solution</a></td></tr>
 <tr class="memitem:a5a3e90ba3f3545542d7a9ae8a34bb618" id="r_a5a3e90ba3f3545542d7a9ae8a34bb618"><td class="memItemLeft"><a class="el" href="classParsedTools_1_1Function.html">ParsedTools::Function</a>&lt; 1 &gt;&#160;</td><td class="memItemRight"><a class="el" href="#a5a3e90ba3f3545542d7a9ae8a34bb618">inflow_function</a></td></tr>
 <tr class="memitem:a17c86ec9914eaccc6ff60e6d8fbe1371" id="r_a17c86ec9914eaccc6ff60e6d8fbe1371"><td class="memItemLeft"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classTimerOutput.html">TimerOutput</a>&#160;</td><td class="memItemRight"><a class="el" href="#a17c86ec9914eaccc6ff60e6d8fbe1371">computing_timer</a></td></tr>
-<tr class="memitem:afbb9f37d88e610557bfc0b15b5231acc" id="r_afbb9f37d88e610557bfc0b15b5231acc"><td class="memItemLeft">std::ofstream&#160;</td><td class="memItemRight"><a class="el" href="#afbb9f37d88e610557bfc0b15b5231acc">csv_P_</a></td></tr>
-<tr class="memitem:a8205cfe3a632939ac9bcc58cf3b5530b" id="r_a8205cfe3a632939ac9bcc58cf3b5530b"><td class="memItemLeft">std::ofstream&#160;</td><td class="memItemRight"><a class="el" href="#a8205cfe3a632939ac9bcc58cf3b5530b">csv_Q_</a></td></tr>
-<tr class="memitem:a79ac06710a5a29345feff39ca5f5159e" id="r_a79ac06710a5a29345feff39ca5f5159e"><td class="memItemLeft">std::vector&lt; std::pair&lt; unsigned int, <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classPoint.html">Point</a>&lt; spacedim &gt; &gt; &gt;&#160;</td><td class="memItemRight"><a class="el" href="#a79ac06710a5a29345feff39ca5f5159e">probe_targets_</a></td></tr>
+<tr class="memitem:a74d8ccda9ed29c87da3e1867f2c68e57" id="r_a74d8ccda9ed29c87da3e1867f2c68e57"><td class="memItemLeft">std::map&lt; unsigned int, std::ofstream &gt;&#160;</td><td class="memItemRight"><a class="el" href="#a74d8ccda9ed29c87da3e1867f2c68e57">csv_vessel_</a></td></tr>
+<tr class="memitem:ab83d4b4c4d4855e2a573ed9f4ed608f4" id="r_ab83d4b4c4d4855e2a573ed9f4ed608f4"><td class="memItemLeft">std::vector&lt; std::pair&lt; unsigned int, typename <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classDoFHandler.html">DoFHandler</a>&lt; dim, spacedim &gt;::active_cell_iterator &gt; &gt;&#160;</td><td class="memItemRight"><a class="el" href="#ab83d4b4c4d4855e2a573ed9f4ed608f4">probe_targets_</a></td></tr>
 <tr class="memitem:a92b943e3f58f1ae16f2910636122e957" id="r_a92b943e3f58f1ae16f2910636122e957"><td class="memItemLeft">std::map&lt; unsigned int, std::pair&lt; double, double &gt; &gt;&#160;</td><td class="memItemRight"><a class="el" href="#a92b943e3f58f1ae16f2910636122e957">vessel_s_bounds</a></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-friends" class="groupheader"><a id="friends" name="friends"></a>
@@ -446,6 +452,33 @@ template&lt;int dim, int spacedim&gt; </div>
 
 </div>
 </div>
+<a id="a46f71eb15e4398a8c1dafd916205defd" name="a46f71eb15e4398a8c1dafd916205defd"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a46f71eb15e4398a8c1dafd916205defd">&#9670;&#160;</a></span>assemble_jacobian_rcr_capacitor_block()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<div class="memtemplate">
+template&lt;int dim, int spacedim&gt; </div>
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">void <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::assemble_jacobian_rcr_capacitor_block </td>
+          <td>(</td>
+          <td class="paramtype">const <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt; &amp;</td>          <td class="paramname"><span class="paramname"><em>y</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel private">private</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+</div>
+</div>
 <a id="a9dbe61473dfdf7bc4566b98b1500b92e" name="a9dbe61473dfdf7bc4566b98b1500b92e"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a9dbe61473dfdf7bc4566b98b1500b92e">&#9670;&#160;</a></span>assemble_jacobian_trace_boundary_block()</h2>
 
@@ -520,6 +553,42 @@ template&lt;int dim, int spacedim&gt; </div>
           <td>(</td>
           <td class="paramtype">const <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt; &amp;</td>          <td class="paramname"><span class="paramname"><em>y</em></span></td><td>)</td>
           <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel private">private</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="ae4223282bb949012b08bc2294d97365b" name="ae4223282bb949012b08bc2294d97365b"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ae4223282bb949012b08bc2294d97365b">&#9670;&#160;</a></span>assemble_rcr_capacitor_equations()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<div class="memtemplate">
+template&lt;int dim, int spacedim&gt; </div>
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">void <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::assemble_rcr_capacitor_equations </td>
+          <td>(</td>
+          <td class="paramtype">const <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt; &amp;</td>          <td class="paramname"><span class="paramname"><em>y</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">const <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt; &amp;</td>          <td class="paramname"><span class="paramname"><em>ydot</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classVector.html">Vector</a>&lt; double &gt; &amp;</td>          <td class="paramname"><span class="paramname"><em>F</em></span>&#160;)</td>
         </tr>
       </table>
   </td>
@@ -723,6 +792,33 @@ template&lt;int dim, int spacedim&gt; </div>
           <td></td>
         </tr>
       </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="a16ee4182ea5f7653b2f7954ff279f283" name="a16ee4182ea5f7653b2f7954ff279f283"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a16ee4182ea5f7653b2f7954ff279f283">&#9670;&#160;</a></span>build_rcr_dof_map()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<div class="memtemplate">
+template&lt;int dim, int spacedim&gt; </div>
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">void <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::build_rcr_dof_map </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel private">private</span></span>  </td>
+  </tr>
+</table>
 </div><div class="memdoc">
 
 </div>
@@ -2638,7 +2734,7 @@ template&lt;int dim, int spacedim&gt; </div>
 <div class="memitem">
 <div class="memproto">
 <div class="memtemplate">
-template&lt;int dim, int spacedim&gt; </div>
+template&lt;int dim, int spacedim = dim&gt; </div>
       <table class="memname">
         <tr>
           <td class="memname">void <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::update_terminal_pressures </td>
@@ -3075,8 +3171,8 @@ template&lt;int dim, int spacedim = dim&gt; </div>
 
 </div>
 </div>
-<a id="afbb9f37d88e610557bfc0b15b5231acc" name="afbb9f37d88e610557bfc0b15b5231acc"></a>
-<h2 class="memtitle"><span class="permalink"><a href="#afbb9f37d88e610557bfc0b15b5231acc">&#9670;&#160;</a></span>csv_P_</h2>
+<a id="a74d8ccda9ed29c87da3e1867f2c68e57" name="a74d8ccda9ed29c87da3e1867f2c68e57"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a74d8ccda9ed29c87da3e1867f2c68e57">&#9670;&#160;</a></span>csv_vessel_</h2>
 
 <div class="memitem">
 <div class="memproto">
@@ -3087,31 +3183,7 @@ template&lt;int dim, int spacedim = dim&gt; </div>
   <td class="mlabels-left">
       <table class="memname">
         <tr>
-          <td class="memname">std::ofstream <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::csv_P_</td>
-        </tr>
-      </table>
-  </td>
-  <td class="mlabels-right">
-<span class="mlabels"><span class="mlabel private">private</span></span>  </td>
-  </tr>
-</table>
-</div><div class="memdoc">
-
-</div>
-</div>
-<a id="a8205cfe3a632939ac9bcc58cf3b5530b" name="a8205cfe3a632939ac9bcc58cf3b5530b"></a>
-<h2 class="memtitle"><span class="permalink"><a href="#a8205cfe3a632939ac9bcc58cf3b5530b">&#9670;&#160;</a></span>csv_Q_</h2>
-
-<div class="memitem">
-<div class="memproto">
-<div class="memtemplate">
-template&lt;int dim, int spacedim = dim&gt; </div>
-<table class="mlabels">
-  <tr>
-  <td class="mlabels-left">
-      <table class="memname">
-        <tr>
-          <td class="memname">std::ofstream <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::csv_Q_</td>
+          <td class="memname">std::map&lt;unsigned int, std::ofstream&gt; <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::csv_vessel_</td>
         </tr>
       </table>
   </td>
@@ -3483,6 +3555,30 @@ template&lt;int dim, int spacedim = dim&gt; </div>
 
 </div>
 </div>
+<a id="ac52c8d84bda196e621899765360067c4" name="ac52c8d84bda196e621899765360067c4"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ac52c8d84bda196e621899765360067c4">&#9670;&#160;</a></span>n_rcr_dofs</h2>
+
+<div class="memitem">
+<div class="memproto">
+<div class="memtemplate">
+template&lt;int dim, int spacedim = dim&gt; </div>
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#a3543786f7dc7c57385fc923a6afd5917">types::global_dof_index</a> <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::n_rcr_dofs = 0</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel private">private</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+</div>
+</div>
 <a id="a3c73c5bcd121015b4fb9457c7d1c9fc8" name="a3c73c5bcd121015b4fb9457c7d1c9fc8"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a3c73c5bcd121015b4fb9457c7d1c9fc8">&#9670;&#160;</a></span>n_refinement_cycles</h2>
 
@@ -3544,6 +3640,30 @@ template&lt;int dim, int spacedim = dim&gt; </div>
       <table class="memname">
         <tr>
           <td class="memname"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#a3543786f7dc7c57385fc923a6afd5917">types::global_dof_index</a> <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::n_trace_dofs = 0</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel private">private</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="a75f235284571c1b70197af2c3970f3dd" name="a75f235284571c1b70197af2c3970f3dd"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a75f235284571c1b70197af2c3970f3dd">&#9670;&#160;</a></span>n_trace_end</h2>
+
+<div class="memitem">
+<div class="memproto">
+<div class="memtemplate">
+template&lt;int dim, int spacedim = dim&gt; </div>
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#a3543786f7dc7c57385fc923a6afd5917">types::global_dof_index</a> <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::n_trace_end = 0</td>
         </tr>
       </table>
   </td>
@@ -3891,8 +4011,8 @@ template&lt;int dim, int spacedim = dim&gt; </div>
 
 </div>
 </div>
-<a id="a79ac06710a5a29345feff39ca5f5159e" name="a79ac06710a5a29345feff39ca5f5159e"></a>
-<h2 class="memtitle"><span class="permalink"><a href="#a79ac06710a5a29345feff39ca5f5159e">&#9670;&#160;</a></span>probe_targets_</h2>
+<a id="ab83d4b4c4d4855e2a573ed9f4ed608f4" name="ab83d4b4c4d4855e2a573ed9f4ed608f4"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ab83d4b4c4d4855e2a573ed9f4ed608f4">&#9670;&#160;</a></span>probe_targets_</h2>
 
 <div class="memitem">
 <div class="memproto">
@@ -3903,7 +4023,7 @@ template&lt;int dim, int spacedim = dim&gt; </div>
   <td class="mlabels-left">
       <table class="memname">
         <tr>
-          <td class="memname">std::vector&lt;std::pair&lt;unsigned int, <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classPoint.html">Point</a>&lt;spacedim&gt; &gt; &gt; <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::probe_targets_</td>
+          <td class="memname">std::vector&lt; std::pair&lt;unsigned int, typename <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/classDoFHandler.html">DoFHandler</a>&lt;dim, spacedim&gt;::active_cell_iterator&gt; &gt; <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::probe_targets_</td>
         </tr>
       </table>
   </td>
@@ -3928,6 +4048,30 @@ template&lt;int dim, int spacedim = dim&gt; </div>
       <table class="memname">
         <tr>
           <td class="memname">std::map&lt;unsigned int, <a class="el" href="structBloodFlowSystem_1_1RCRPhysics.html">RCRPhysics</a>&gt; <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::rcr_map</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel private">private</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="a65972c95c023f5720b2aeb4e78127501" name="a65972c95c023f5720b2aeb4e78127501"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a65972c95c023f5720b2aeb4e78127501">&#9670;&#160;</a></span>rcr_pc_dof</h2>
+
+<div class="memitem">
+<div class="memproto">
+<div class="memtemplate">
+template&lt;int dim, int spacedim = dim&gt; </div>
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">std::map&lt;<a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#aed8813fee8c8a2edcc6005e6a48c321a">types::boundary_id</a>, <a class="elRef" href="http://www.dealii.org/developer/doxygen/deal.II/namespacetypes.html#a3543786f7dc7c57385fc923a6afd5917">types::global_dof_index</a>&gt; <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::rcr_pc_dof</td>
         </tr>
       </table>
   </td>
@@ -4336,6 +4480,30 @@ template&lt;int dim, int spacedim = dim&gt; </div>
       <table class="memname">
         <tr>
           <td class="memname">std::map&lt;unsigned int, std::pair&lt;double, double&gt; &gt; <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::vessel_s_bounds</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel private">private</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="ad2412109eef1e252bc57e1fe74c7cc6e" name="ad2412109eef1e252bc57e1fe74c7cc6e"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ad2412109eef1e252bc57e1fe74c7cc6e">&#9670;&#160;</a></span>vid_to_rcr_vertex</h2>
+
+<div class="memitem">
+<div class="memproto">
+<div class="memtemplate">
+template&lt;int dim, int spacedim = dim&gt; </div>
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">std::map&lt;unsigned int, unsigned int&gt; <a class="el" href="classBloodFlowSystem.html">BloodFlowSystem</a>&lt; dim, spacedim &gt;::vid_to_rcr_vertex</td>
         </tr>
       </table>
   </td>

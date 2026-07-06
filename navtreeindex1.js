@@ -1,5 +1,8 @@
 var NAVTREEINDEX1 =
 {
+"group__Exceptions.html#ga41588265da25c21e5a1d25e34ef9dbd0":[1,0,98,1],
+"group__Exceptions.html#ga434767a4876fd536f7fc8fa040623e91":[1,0,106,4],
+"group__Exceptions.html#ga454c7b57451cc315d7be8bf051ddd3b7":[1,0,74,6],
 "group__Exceptions.html#ga4a1a3e38e59f8451b67a8ebd0fb50e70":[1,0,47,65,15],
 "group__Exceptions.html#ga4b8e51adca4b61c390997ac03b2a721a":[1,0,94,71],
 "group__Exceptions.html#ga4fe937c2e18e8999dff3739b4248fb38":[1,0,31,28],
@@ -246,8 +249,5 @@ var NAVTREEINDEX1 =
 "namespaceCGALWrappers.html#ace61a89fb6186586112abd8a95254ab9":[1,0,8,5],
 "namespaceCGALWrappers.html#add8b979ebb0396b0ab7b3e68c842a920":[1,0,8,40],
 "namespaceCGALWrappers.html#afa5b29e80bd919ad3129e0ce7b5b9e26":[1,0,8,19],
-"namespaceCGALWrappers_1_1internal.html":[1,0,8,0],
-"namespaceCGALWrappers_1_1internal.html#a19f9f3e6cb3dcb7da476f20507cb6d95":[1,0,8,0,10],
-"namespaceCGALWrappers_1_1internal.html#a20f9a8bbd2fa5e63a0e718fda9330774":[1,0,8,0,3],
-"namespaceCGALWrappers_1_1internal.html#a45904e15448af61089d34d6f404fea6e":[1,0,8,0,2]
+"namespaceCGALWrappers_1_1internal.html":[1,0,8,0]
 };

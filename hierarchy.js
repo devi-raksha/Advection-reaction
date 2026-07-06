@@ -20,7 +20,6 @@ var hierarchy =
       [ "ParsedTools::Constants", "classParsedTools_1_1Constants.html", null ],
       [ "ParsedTools::Function< dim >", "classParsedTools_1_1Function.html", null ]
     ] ],
-    [ "ProbeSpec", "structProbeSpec.html", null ],
     [ "BloodFlowSystem&lt; dim, spacedim &gt;::RCRPhysics", "structBloodFlowSystem_1_1RCRPhysics.html", null ],
     [ "BloodFlowSystem&lt; dim, spacedim &gt;::VesselPhysicalProperties", "structBloodFlowSystem_1_1VesselPhysicalProperties.html", null ]
 ];
