@@ -123,8 +123,10 @@ test()
     (i >= problem.n_trace_end ? pc_sq : rest_sq) += residual[i] * residual[i];
   deallog << "rest residual=" << std::sqrt(rest_sq)
           << "  pc=" << std::sqrt(pc_sq) << std::endl;
-  deallog << "||residual with Pc|| = " << residual.l2_norm()
-          << "  (should be ~0 at equilibrium when terminal pressure is Pc = P_out )" << std::endl;
+  deallog
+    << "||residual with Pc|| = " << residual.l2_norm()
+    << "  (should be ~0 at equilibrium when terminal pressure is Pc = P_out )"
+    << std::endl;
 
   // ── J · ones, dot with ones ──────────────────────────────────────────────
   Vector<double> ones(problem.solution.size());

@@ -110,12 +110,12 @@ test()
   problem.assemble_residual(problem.time, problem.solution, ydot, residual);
   deallog << "n_active_cells = " << problem.triangulation.n_active_cells()
           << std::endl;
-  // because of Pc = p_d not p_out so the residual will chnage here        
+  // because of Pc = p_d not p_out so the residual will chnage here
   double pc_sq = 0, rest_sq = 0;
   for (unsigned int i = 0; i < residual.size(); ++i)
     (i >= problem.n_trace_end ? pc_sq : rest_sq) += residual[i] * residual[i];
-  deallog << "rest residual=" << std::sqrt(rest_sq) << "  pc=" << std::sqrt(pc_sq)
-          << std::endl;
+  deallog << "rest residual=" << std::sqrt(rest_sq)
+          << "  pc=" << std::sqrt(pc_sq) << std::endl;
 }
 
 int

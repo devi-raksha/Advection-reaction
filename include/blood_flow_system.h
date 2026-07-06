@@ -245,8 +245,8 @@ private:
     double R1, R2, C, P_out;
   };
   std::map<unsigned int, RCRPhysics>   rcr_map;
-  std::map<unsigned int, unsigned int> vid_to_rcr_vertex;     // key = vessel id
-   // key = vessel id
+  std::map<unsigned int, unsigned int> vid_to_rcr_vertex; // key = vessel id
+                                                          // key = vessel id
   std::map<types::boundary_id, double> terminal_Pc_storage;
   std::set<types::boundary_id>         terminal_boundary_ids;
 
@@ -291,7 +291,7 @@ private:
   // C > 0)
 
   std::map<types::boundary_id, types::global_dof_index> rcr_pc_dof;
-  types::global_dof_index n_rcr_dofs  = 0;
+  types::global_dof_index                               n_rcr_dofs = 0;
   types::global_dof_index n_trace_end = 0; // = n_cell_dofs + n_trace_dofs
   void
   build_rcr_dof_map();
