@@ -8,6 +8,8 @@
 #include <deal.II/base/quadrature_lib.h>
 #include <deal.II/base/timer.h>
 
+#include <deal.II/distributed/fully_distributed_tria.h>
+
 #include <deal.II/dofs/dof_handler.h>
 #include <deal.II/dofs/dof_tools.h>
 
@@ -217,11 +219,26 @@ public:
   {
     return numerical_flux_type;
   }
+  // std::map<FaceKey, FaceTraceDof> face_dof_map;
 
 private:
   // -----------------------------------------------------------------------
   // Physical parameters
   // -----------------------------------------------------------------------
+  using VertexKey = unsigned int;
+  using FaceKey   = std::pair<CellId, unsigned int>;
+
+  // One trace DOF per physical vertex
+
+  std::map<std::pair<CellId, unsigned int>, FaceTraceDof> face_dof_map;
+
+
+  // Junction ownership is associated with a half-face
+  std::map<FaceKey, types::subdomain_id> junction_owner;
+
+  VertexKey
+  face_key(const typename DoFHandler<dim, spacedim>::active_cell_iterator &cell,
+           const unsigned int face_no) const;
   ParsedTools::Constants    par;
   AffineConstraints<double> constraints;
   double                    current_dt  = 0.0;
@@ -259,7 +276,9 @@ private:
   // -----------------------------------------------------------------------
   // Mesh and FE spaces (cell unknowns only — DGQ)
   // -----------------------------------------------------------------------
-  Triangulation<dim, spacedim>                  triangulation;
+  MPI_Comm mpi_communicator;
+  parallel::fullydistributed::Triangulation<dim, spacedim> triangulation;
+ 
   DoFHandler<dim, spacedim>                     dof_handler;
   std::unique_ptr<FiniteElement<dim, spacedim>> fe;
 
@@ -281,8 +300,7 @@ private:
   // Solution vector layout:  [ cell block | trace block ]
   //                           0 …n_cell-1   n_cell … n_total-1
   // -----------------------------------------------------------------------
-  std::map<std::pair<CellId, unsigned int>, FaceTraceDof> face_dof_map;
-
+  // std::map<FaceKey, FaceTraceDof> face_dof_map;
   // ----------------------------------------------------------------------
   // Trace continuity (NEW)
   //
@@ -360,6 +378,9 @@ private:
   {
     Point<spacedim>               location;
     std::vector<JunctionHalfFace> half_faces; // one entry per incident vessel
+
+    types::subdomain_id owner_rank = numbers::invalid_subdomain_id;
+
     unsigned int
     n_vessels() const
     {
@@ -369,6 +390,7 @@ private:
 
   std::vector<JunctionInfo>                 junctions;
   std::set<std::pair<CellId, unsigned int>> all_junction_faces;
+  ///std::map<std::pair<CellId, unsigned int>, types::subdomain_id> junction_owner;
 
   // ----------------------------------------------------------------------
   // If true, a valence-2 node joining two *different* vessel ids is demoted
@@ -677,10 +699,11 @@ private:
   // Return the canonical key for a face.  For interior faces the cell
   // with the lexicographically smaller CellId is always the key owner.
   std::pair<CellId, unsigned int>
-  canonical_face_key(
-    const typename DoFHandler<dim, spacedim>::active_cell_iterator &cell,
-    const unsigned int face_no) const;
+                                                    canonical_face_key(
+                                                      const typename DoFHandler<dim, spacedim>::active_cell_iterator &cell,
+                                                      const unsigned int face_no) const;
   std::map<unsigned int, std::pair<double, double>> vessel_s_bounds;
+
   // Read (A_hat, U_hat) from the trace block of y.
   void
   get_face_trace(
@@ -987,6 +1010,16 @@ private:
   assemble_jacobian_trace_continuity_block();
 
   // Mass matrix - only acts on the cell block; trace block rows/cols = 0.
+  void
+  build_cell_sparsity(DynamicSparsityPattern &dsp);
+  void
+  build_trace_sparsity(DynamicSparsityPattern &dsp);
+  void
+  build_junction_sparsity(DynamicSparsityPattern &dsp);
+  void
+  build_rcr_sparsity(DynamicSparsityPattern &dsp);
+  void
+  build_trace_continuity_sparsity(DynamicSparsityPattern &dsp);
   void
   build_extended_sparsity_pattern();
 

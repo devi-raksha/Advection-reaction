@@ -16,6 +16,7 @@
 #include <deal.II/dofs/dof_renumbering.h>
 
 #include <deal.II/grid/grid_in.h>
+#include <deal.II/grid/grid_tools.h>
 #include <deal.II/grid/tria_accessor.h>
 #include <deal.II/grid/tria_iterator.h>
 
@@ -48,7 +49,8 @@ BloodFlowSystem<dim, spacedim>::BloodFlowSystem()
          "Profile constant for friction term",
          "Tube law exponent",
          "Reflection coefficient at outflow boundary"})
-  , triangulation()
+  , mpi_communicator(MPI_COMM_WORLD)
+  , triangulation(mpi_communicator)
   , dof_handler(triangulation)
   , fe(nullptr)
   , rhs_function("Functions",
@@ -141,8 +143,13 @@ BloodFlowSystem<dim, spacedim>::detect_junctions()
     vertex_to_half_faces;
 
   for (const auto &cell : dof_handler.active_cell_iterators())
-    for (unsigned int v = 0; v < GeometryInfo<dim>::vertices_per_cell; ++v)
-      vertex_to_half_faces[cell->vertex_index(v)].emplace_back(cell, v);
+    {
+      if (cell->is_artificial())
+        continue;
+
+      for (unsigned int v = 0; v < GeometryInfo<dim>::vertices_per_cell; ++v)
+        vertex_to_half_faces[cell->vertex_index(v)].emplace_back(cell, v);
+    }
 
   for (const auto &[v_idx, half_faces] : vertex_to_half_faces)
     {
@@ -156,7 +163,7 @@ BloodFlowSystem<dim, spacedim>::detect_junctions()
       //                                    junction like 2 way junction.
       // n_inc >= 3                  ->   Junction.
       if (n_inc == 1)
-        continue; // boundary inlet / terminal
+        continue; // boundary
 
       if (n_inc == 2)
         {
@@ -198,6 +205,25 @@ BloodFlowSystem<dim, spacedim>::detect_junctions()
           J.half_faces.push_back(jhf);
           all_junction_faces.emplace(cell->id(), local_face);
         }
+      types::subdomain_id owner = numbers::invalid_subdomain_id;
+
+      for (const auto &hf : J.half_faces)
+        {
+          owner = std::min(owner, hf.cell->subdomain_id());
+        }
+
+
+      J.owner_rank = owner;
+      // store junction
+
+      for (const auto &hf : J.half_faces)
+        junction_owner[{hf.cell->id(), hf.face_no}] = owner;
+      const unsigned int my_rank =
+        Utilities::MPI::this_mpi_process(mpi_communicator);
+
+      std::cout << "Rank " << my_rank << " sees junction at " << J.location
+                << " with " << J.n_vessels()
+                << " vessels. Owner = " << J.owner_rank << std::endl;
 
       junctions.push_back(std::move(J));
     }
@@ -271,17 +297,68 @@ BloodFlowSystem<dim, spacedim>::build_face_dof_map()
   std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
+      if (cell->is_artificial())
+        continue;
       cell->get_dof_indices(ldofs);
       for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
         {
           const auto key              = canonical_face_key(cell, f);
           const auto [a_here, u_here] = face_trace_dofs(ldofs, f);
-          const bool i_am_owner = (key.first == cell->id() && key.second == f);
+          bool i_am_owner             = false;
 
-          if (i_am_owner)
-            face_dof_map[key] = FaceTraceDof{a_here, u_here};
+          if (cell->face(f)->at_boundary())
+            {
+              i_am_owner = true;
+            }
+          else if (is_junction_face(cell->id(), f))
+            {
+              auto it = junction_owner.find(key);
+
+              Assert(it != junction_owner.end(), ExcInternalError());
+
+              i_am_owner = (it->second ==
+                            Utilities::MPI::this_mpi_process(mpi_communicator));
+            }
           else
-            pending.push_back({key, a_here, u_here}); // interior far side
+            {
+              auto neighbor = cell->neighbor(f);
+
+              if (neighbor->is_artificial())
+                {
+                  // We own the interface.
+                  i_am_owner = true;
+                }
+              else if (neighbor->is_locally_owned())
+                {
+                  // Same MPI rank.
+                  i_am_owner = (cell->id() < neighbor->id());
+                }
+              else
+                {
+                  // Ghost neighbor.
+                  i_am_owner =
+                    (cell->subdomain_id() < neighbor->subdomain_id());
+                }
+            }
+          if (i_am_owner)
+            {
+              face_dof_map[key] = FaceTraceDof{a_here, u_here};
+            }
+          else
+            {
+              // Only create continuity equations for interfaces that are
+              // completely local to this MPI rank.
+              if (!cell->face(f)->at_boundary() &&
+                  !is_junction_face(cell->id(), f))
+                {
+                  const auto neighbor = cell->neighbor(f);
+
+                  if (neighbor->is_locally_owned())
+                    {
+                      pending.push_back({key, a_here, u_here});
+                    }
+                }
+            } // interior far side
         }
     }
 
@@ -367,93 +444,127 @@ BloodFlowSystem<dim, spacedim>::get_face_trace(
   U_hat = y[it->second.u_hat_dof];
 }
 
-// ============================================================================
-// build_extended_sparsity_pattern: it constructs the sparsity pattern of the
-// Jacobian J = (J_cc  J_ct;   J_tc J_tt) where c=cell dofs, t=trace dofs
-//
-// Builds a DynamicSparsityPattern for the full n_total × n_total system.
-// Coupling rules:
-//   Cell i <-> cell j       if they share a face  (standard DG)
-//   Cell i <-> trace (f)    for every face f of cell i
-//   Trace (f) <-> cell i    for every cell incident to face f
-//   Trace (f) <-> trace (g) for every pair of traces sharing a junction vertex
-// ============================================================================
+// build_cell_residual_sparsity: it constructs the sparsity pattern of the
+//  cell block of the Jacobian J_cc = ∂R_c/∂y_c
+
 template <int dim, int spacedim>
 void
-BloodFlowSystem<dim, spacedim>::build_extended_sparsity_pattern()
+BloodFlowSystem<dim, spacedim>::build_cell_sparsity(
+  DynamicSparsityPattern &dsp)
 {
-  TimerOutput::Scope timer(computing_timer, "build_extended_sparsity_pattern");
+  // TimerOutput::Scope timer(computing_timer, "build_cell_residual_sparsity");
+  const types::global_dof_index n_fe = dof_handler.n_dofs();
 
-  DynamicSparsityPattern dsp(n_total_dofs, n_total_dofs);
+  DynamicSparsityPattern cell_dsp(n_fe, n_fe);
 
-  // ---- (1a) Cell–cell coupling via make_flux_sparsity_pattern ---------------
-  // make_flux_sparsity_pattern requires sparsity.n_rows() ==
-  // dof_handler.n_dofs()
-  // (== n_cell_dofs).  Build it on a separate cell-sized DSP and copy entries
-  // into the extended one so the row/column indices stay in [0, n_cell_dofs).
-  {
-    // The DoFHandler spans the full FE range (cell comps 0,1 + trace
-    // comps 2,3), so the flux-sparsity DSP must be sized dof_handler.n_dofs().
-    const types::global_dof_index n_fe = dof_handler.n_dofs();
-    DynamicSparsityPattern        cell_dsp(n_fe, n_fe);
-    DoFTools::make_flux_sparsity_pattern(dof_handler,
-                                         cell_dsp); // standard DG sparsity
+  DoFTools::make_flux_sparsity_pattern(dof_handler, cell_dsp);
 
-    for (const auto &entry : cell_dsp)
-      dsp.add(entry.row(), entry.column());
-  }
+  for (const auto &entry : cell_dsp)
+    dsp.add(entry.row(), entry.column());
+  // cell-trace
+  std::vector<types::global_dof_index> cell_dofs(fe->n_dofs_per_cell());
 
-  // ---- (1b) Cell–trace and trace–trace couplings ---------------------------
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
-      std::vector<types::global_dof_index> cell_dofs(fe->n_dofs_per_cell());
+      if (!cell->is_locally_owned())
+        continue;
+
+      cell->get_dof_indices(cell_dofs);
+      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        {
+          const auto key = canonical_face_key(cell, f);
+
+          auto it = face_dof_map.find(key);
+
+          if (it == face_dof_map.end())
+            continue;
+          const auto a_hat = it->second.a_hat_dof;
+          const auto u_hat = it->second.u_hat_dof;
+
+          for (auto ci : cell_dofs)
+            {
+              dsp.add(ci, a_hat);
+              dsp.add(ci, u_hat);
+            }
+        }
+    }
+}
+
+// build_trace_residual_sparsity: it constructs the sparsity pattern of the
+//  trace block of the Jacobian J_tt = ∂R_t/∂y_t
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_trace_sparsity(
+  DynamicSparsityPattern &dsp)
+{
+  std::vector<types::global_dof_index> cell_dofs(fe->n_dofs_per_cell());
+
+  for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+      if (!cell->is_locally_owned())
+        continue;
+
       cell->get_dof_indices(cell_dofs);
 
       for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
         {
           const auto key = canonical_face_key(cell, f);
-          const auto it  = face_dof_map.find(key);
-          Assert(it != face_dof_map.end(), ExcInternalError());
 
-          const types::global_dof_index a_hat = it->second.a_hat_dof;
-          const types::global_dof_index u_hat = it->second.u_hat_dof;
+          auto it = face_dof_map.find(key);
 
-          // Cell DOFs <-> their face trace DOFs (both blocks, both directions)
-          for (const types::global_dof_index ci : cell_dofs)
-            {
-              dsp.add(ci, a_hat);
-              dsp.add(ci, u_hat);
-              dsp.add(a_hat, ci);
-              dsp.add(u_hat, ci);
-            }
+          if (it == face_dof_map.end())
+            continue;
 
-          // Trace self-coupling (needed for trace–trace Jacobian rows)
+          const auto a_hat = it->second.a_hat_dof;
+          const auto u_hat = it->second.u_hat_dof;
           dsp.add(a_hat, a_hat);
           dsp.add(a_hat, u_hat);
+
           dsp.add(u_hat, a_hat);
           dsp.add(u_hat, u_hat);
 
-          // For interior faces: trace rows also couple to the neighbour's cell
-          // DOFs (trace equation R uses cell values from both sides)
+          for (const auto ci : cell_dofs)
+            {
+              dsp.add(a_hat, ci);
+              dsp.add(u_hat, ci);
+            }
           if (!cell->face(f)->at_boundary())
             {
-              const auto                          &nb = cell->neighbor(f);
-              std::vector<types::global_dof_index> nb_dofs(
-                fe->n_dofs_per_cell());
-              nb->get_dof_indices(nb_dofs);
+              const auto nb = cell->neighbor(f);
 
-              for (const types::global_dof_index ni : nb_dofs)
+              if (nb->is_locally_owned())
                 {
-                  dsp.add(a_hat, ni); // J(R_t, w_{l/r})
-                  dsp.add(u_hat, ni);
+                  std::vector<types::global_dof_index> nb_dofs(
+                    fe->n_dofs_per_cell());
+
+                  nb->get_dof_indices(nb_dofs);
+
+                  for (const auto ni : nb_dofs)
+                    {
+                      dsp.add(a_hat, ni);
+                      dsp.add(u_hat, ni);
+                    }
                 }
             }
         }
     }
+}
 
-  // ---- (2) Junction: all K trace-pairs couple to each other ----------------
+// build_junction_sparsity: it constructs the sparsity pattern of the junction
+// block of the Jacobian J_junction = ∂R_junction/∂y_junction
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_junction_sparsity(
+  DynamicSparsityPattern &dsp)
+{
+  const unsigned int my_rank =
+    Utilities::MPI::this_mpi_process(mpi_communicator);
+
   for (const auto &J : junctions)
     {
+      if (J.owner_rank != my_rank)
+        continue;
+
       const unsigned int K = J.n_vessels();
 
       std::vector<std::pair<types::global_dof_index, types::global_dof_index>>
@@ -463,8 +574,12 @@ BloodFlowSystem<dim, spacedim>::build_extended_sparsity_pattern()
         {
           const auto key =
             canonical_face_key(J.half_faces[i].cell, J.half_faces[i].face_no);
-          const auto it = face_dof_map.find(key);
-          Assert(it != face_dof_map.end(), ExcInternalError());
+
+          auto it = face_dof_map.find(key);
+
+          if (it == face_dof_map.end())
+            continue;
+
           tdofs[i] = {it->second.a_hat_dof, it->second.u_hat_dof};
         }
 
@@ -477,29 +592,52 @@ BloodFlowSystem<dim, spacedim>::build_extended_sparsity_pattern()
             dsp.add(tdofs[i].second, tdofs[j].second);
           }
     }
+}
 
-  // ---- (3) RCR capacitor DOFs: couple to their face traces ----------------
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_rcr_sparsity(DynamicSparsityPattern &dsp)
+{
   for (const auto &cell : dof_handler.active_cell_iterators())
-    for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-      {
-        if (!cell->face(f)->at_boundary())
-          continue;
-        if (is_junction_face(cell->id(), f))
-          continue;
-        const auto pit = rcr_pc_dof.find(cell->face(f)->boundary_id());
-        if (pit == rcr_pc_dof.end())
-          continue;
+    {
+      if (!cell->is_locally_owned())
+        continue;
 
-        const types::global_dof_index pc = pit->second;
-        const auto &td = face_dof_map.at(canonical_face_key(cell, f));
+      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        {
+          if (!cell->face(f)->at_boundary())
+            continue;
 
-        dsp.add(pc, pc);
-        dsp.add(pc, td.a_hat_dof); // dR_pc/dÂ
-        dsp.add(pc, td.u_hat_dof); // dR_pc/dÛ
-        dsp.add(td.a_hat_dof, pc); // res_A now depends on Pc
-      }
+          if (is_junction_face(cell->id(), f))
+            continue;
 
-  // ---- (4) Trace continuity: duplicate side depends on itself + master -----
+          const auto pit = rcr_pc_dof.find(cell->face(f)->boundary_id());
+
+          if (pit == rcr_pc_dof.end())
+            continue;
+
+          auto it = face_dof_map.find(canonical_face_key(cell, f));
+
+          if (it == face_dof_map.end())
+            continue;
+
+          const auto pc = pit->second;
+
+          dsp.add(pc, pc);
+
+          dsp.add(pc, it->second.a_hat_dof);
+          dsp.add(pc, it->second.u_hat_dof);
+
+          dsp.add(it->second.a_hat_dof, pc);
+        }
+    }
+}
+
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_trace_continuity_sparsity(
+  DynamicSparsityPattern &dsp)
+{
   for (const auto &p : trace_continuity_pairs)
     {
       dsp.add(p.a_dup, p.a_dup);
@@ -507,6 +645,38 @@ BloodFlowSystem<dim, spacedim>::build_extended_sparsity_pattern()
       dsp.add(p.u_dup, p.u_dup);
       dsp.add(p.u_dup, p.u_canon);
     }
+}
+
+// ============================================================================
+// build_extended_sparsity_pattern: it constructs the sparsity
+// pattern of the Jacobian J = (J_cc  J_ct;   J_tc J_tt) where
+// c=cell dofs, t=trace dofs
+//
+// Builds a DynamicSparsityPattern for the full n_total × n_total
+// system. Coupling rules:
+//   Cell i <-> cell j       if they share a face  (standard DG)
+//   Cell i <-> trace (f)    for every face f of cell i
+//   Trace (f) <-> cell i    for every cell incident to face f
+//   Trace (f) <-> trace (g) for every pair of traces sharing a
+//   junction vertex
+// ============================================================================
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_extended_sparsity_pattern()
+{
+  TimerOutput::Scope timer(computing_timer, "build_extended_sparsity_pattern");
+
+  DynamicSparsityPattern dsp(n_total_dofs, n_total_dofs);
+
+  build_cell_sparsity(dsp);
+
+  build_trace_sparsity(dsp);
+
+  build_junction_sparsity(dsp);
+
+  build_rcr_sparsity(dsp);
+
+  build_trace_continuity_sparsity(dsp);
 
   sparsity_pattern.copy_from(dsp);
 }
@@ -520,7 +690,8 @@ BloodFlowSystem<dim, spacedim>::setup_system()
 {
   TimerOutput::Scope timer(computing_timer, "setup_system");
 
-  // ---- vessel map ----------------------------------------------------------
+  // ---- vessel map
+  // ----------------------------------------------------------
   vessel_map.clear();
   for (const auto &cell : triangulation.active_cell_iterators())
     {
@@ -543,7 +714,8 @@ BloodFlowSystem<dim, spacedim>::setup_system()
     }
 
 
-  // ---- vessel arc-length bounds ---------------------------------------
+  // ---- vessel arc-length bounds
+  // ---------------------------------------
   vessel_s_bounds.clear();
 
   for (const auto &cell : dof_handler.active_cell_iterators())
@@ -576,7 +748,8 @@ BloodFlowSystem<dim, spacedim>::setup_system()
     std::cout << "  " << std::setw(3) << vid << "   " << std::setw(10)
               << (b.second - b.first) * 1000.0 << "\n";
 
-  // ---- FE space (cell unknowns only) ---------------------------------------
+  // ---- FE space (cell unknowns only)
+  // ---------------------------------------
   if (!fe)
     fe = std::make_unique<FESystem<dim, spacedim>>(
       FE_DGQ<dim, spacedim>(fe_degree),
@@ -586,16 +759,18 @@ BloodFlowSystem<dim, spacedim>::setup_system()
 
   dof_handler.distribute_dofs(*fe);
   // Order DOFs as [ cell comps 0,1 | trace comps 2,3 ]
-  DoFRenumbering::component_wise(dof_handler);
+   //DoFRenumbering::component_wise(dof_handler);
 
-  // ---- junction detection + face DOF map -----------------------------------
+  // ---- junction detection + face DOF map
+  // -----------------------------------
   junctions.clear();
   all_junction_faces.clear();
   detect_junctions();
   build_face_dof_map();
   build_rcr_dof_map();
 
-  // ---- sparsity + matrices --------------------------------------------------
+  // ---- sparsity + matrices
+  // --------------------------------------------------
   build_extended_sparsity_pattern();
 
   jacobian_matrix.reinit(sparsity_pattern);
@@ -607,7 +782,8 @@ BloodFlowSystem<dim, spacedim>::setup_system()
   pressure.reinit(n_total_dofs);
   theoretical_peak.reinit(n_total_dofs);
 
-  // ---- terminal boundary IDs -----------------------------------------------
+  // ---- terminal boundary IDs
+  // -----------------------------------------------
   terminal_boundary_ids.clear();
   for (const auto &cell : triangulation.active_cell_iterators())
     for (unsigned int f : cell->face_indices())
@@ -666,7 +842,8 @@ BloodFlowSystem<dim, spacedim>::compute_initial_solution(Vector<double> &dst,
 
   dst.reinit(n_total_dofs);
 
-  // ---- cell block -----------------------------------------------------------
+  // ---- cell block
+  // -----------------------------------------------------------
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
       // const unsigned int vid = cell->material_id();
@@ -682,7 +859,8 @@ BloodFlowSystem<dim, spacedim>::compute_initial_solution(Vector<double> &dst,
         }
     }
 
-  // ---- trace block --------------------------------------------------------
+  // ---- trace block
+  // --------------------------------------------------------
   std::set<std::pair<CellId, unsigned int>> visited;
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
@@ -707,7 +885,8 @@ BloodFlowSystem<dim, spacedim>::compute_initial_solution(Vector<double> &dst,
                   dst[td.a_hat_dof] = ad_local;
                   dst[td.u_hat_dof] = 0.0; // consistent velocity
                 }
-              else // RCR or reflection outlet: already consistent with U=0
+              else // RCR or reflection outlet: already consistent
+                   // with U=0
                 {
                   dst[td.a_hat_dof] = ad_local;
                   dst[td.u_hat_dof] = 0.0;
@@ -717,7 +896,8 @@ BloodFlowSystem<dim, spacedim>::compute_initial_solution(Vector<double> &dst,
                    !is_junction_face(cell->id(), f))
             {
               const double ad_local = compute_a_d_local(cell);
-              // Interior: average area, zero velocity (flux = A*U*bn = 0 )
+              // Interior: average area, zero velocity (flux =
+              // A*U*bn = 0 )
 
               dst[td.a_hat_dof] =
                 0.5 * (ad_local + compute_a_d_at_face(cell->neighbor(f), f));
@@ -733,8 +913,9 @@ BloodFlowSystem<dim, spacedim>::compute_initial_solution(Vector<double> &dst,
         }
     }
 
-  // Seed each duplicate (interior far-side) trace DOF equal to its canonical
-  // master so the continuity residual starts at zero.
+  // Seed each duplicate (interior far-side) trace DOF equal to
+  // its canonical master so the continuity residual starts at
+  // zero.
   for (const auto &p : trace_continuity_pairs)
     {
       dst[p.a_dup] = dst[p.a_canon];
@@ -778,14 +959,16 @@ BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(Vector<double> &sol,
 
   for (int iter = 0; iter < max_iter; ++iter)
     {
-      // ── Step 1 ─ Assemble G(yhat) = F_trace(y_cell^0, yhat) ─────────────
+      // ── Step 1 ─ Assemble G(yhat) = F_trace(y_cell^0, yhat)
+      // ─────────────
       Vector<double> G(n_total_dofs);
       assemble_trace_interior_equations(sol, G);
       assemble_trace_boundary_equations(t, sol, G);
       assemble_trace_junction_equations(sol, G);
       assemble_trace_continuity_equations(sol, G); // duplicate-side ties
 
-      // ── Convergence check ──── CHANGED: loop only over trace, not Pc ─────
+      // ── Convergence check ──── CHANGED: loop only over trace,
+      // not Pc ─────
       double gnorm_inf = 0.0;
       double gnorm_l2  = 0.0;
       for (types::global_dof_index i = n_cell_dofs; i < n_trace_end; ++i)
@@ -814,7 +997,8 @@ BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(Vector<double> &sol,
           break;
         }
 
-      // ── Step 2 ─ Assemble J_tt ──────────────────────────────────────────
+      // ── Step 2 ─ Assemble J_tt
+      // ──────────────────────────────────────────
       newton_matrix = 0.0;
 
       assemble_jacobian_trace_interior_block(sol);
@@ -822,7 +1006,8 @@ BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(Vector<double> &sol,
       assemble_jacobian_trace_junction_block(sol);
       assemble_jacobian_trace_continuity_block();
 
-      // No is_pc_row branch needed any more since we don't touch Pc rows.
+      // No is_pc_row branch needed any more since we don't touch
+      // Pc rows.
       for (types::global_dof_index i = n_cell_dofs; i < n_trace_end; ++i)
         {
           for (auto it = jacobian_matrix.begin(i); it != jacobian_matrix.end(i);
@@ -830,8 +1015,8 @@ BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(Vector<double> &sol,
             newton_matrix.add(i, it->column(), it->value());
         }
 
-      // Stamp cell diagonal with 1 (cell components only; trace rows keep the
-      // Jacobian just copied in above).
+      // Stamp cell diagonal with 1 (cell components only; trace
+      // rows keep the Jacobian just copied in above).
       for (const auto &cell : dof_handler.active_cell_iterators())
         {
           std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
@@ -846,24 +1031,28 @@ BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(Vector<double> &sol,
 
       jacobian_matrix = 0.0;
 
-      // ── Step 3 ─ Build Newton RHS: b = −G ───────────────────────────────
-      // fill RHS for trace rows. Pc rows get 0 -> identity row
-      // gives delta[pc]=0, so Pc stays at its seeded value.
+      // ── Step 3 ─ Build Newton RHS: b = −G
+      // ─────────────────────────────── fill RHS for trace rows.
+      // Pc rows get 0 -> identity row gives delta[pc]=0, so Pc
+      // stays at its seeded value.
       Vector<double> rhs(n_total_dofs);
       for (types::global_dof_index i = n_cell_dofs; i < n_trace_end; ++i)
         rhs[i] = -G[i];
 
-      // ── Step 4 ─ Solve and update trace DOFs ─────────────────────────────
+      // ── Step 4 ─ Solve and update trace DOFs
+      // ─────────────────────────────
       newton_solver.initialize(newton_matrix);
       Vector<double> delta(n_total_dofs);
       newton_solver.vmult(delta, rhs);
 
-      // only apply correction to trace block (Pc delta is 0 anyway).
+      // only apply correction to trace block (Pc delta is 0
+      // anyway).
       for (types::global_dof_index i = n_cell_dofs; i < n_trace_end; ++i)
         sol[i] += delta[i];
     }
 
-  // ── Step 5 ─ Final per-type diagnostic ────────────────────────────────────
+  // ── Step 5 ─ Final per-type diagnostic
+  // ────────────────────────────────────
   {
     Vector<double> F_final(n_total_dofs);
     assemble_trace_interior_equations(sol, F_final);
@@ -907,12 +1096,16 @@ BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(Vector<double> &sol,
 // build_per_cell_mass
 //
 // For every active cell K, compute both:
-//   per_cell_mass_    : forward M_K  — used in assemble_residual (M*ydot term)
+//   per_cell_mass_    : forward M_K  — used in assemble_residual
+//   (M*ydot term)
 //                       and assemble_jacobian (alpha*M term)
-//   per_cell_mass_inv : M_K^{-1}    — used in computing consistent
-//                       initial solution_dot = M_K^{-1} * F_cell(y0)
+//   per_cell_mass_inv : M_K^{-1}    — used in computing
+//   consistent
+//                       initial solution_dot = M_K^{-1} *
+//                       F_cell(y0)
 //
-// IDA receives the true DAE residual F(t,y,ydot) = M*ydot - R(y) directly.
+// IDA receives the true DAE residual F(t,y,ydot) = M*ydot - R(y)
+// directly.
 // ============================================================================
 
 template <int dim, int spacedim>
@@ -933,14 +1126,17 @@ BloodFlowSystem<dim, spacedim>::build_per_cell_mass_inv()
       fev.reinit(cell);
       FullMatrix<double> M(n_dofs, n_dofs);
 
-      // FESystem(FE_DGQ, 2) shape functions are component-specific:
-      // phi_i is nonzero only for its component, so M(i,j) = 0 whenever
-      // component(i)!= component(j).  We must skip cross-component pairs;
-      // otherwise M has zero rows/columns and gauss_jordan() aborts.
-      // Only the cell components (0,1) carry a mass term; the FE_DGQ(1) trace
-      // components (2,3) are algebraic, so their rows/cols of M stay zero.
-      // (Without this, alpha*M would give the trace DOFs a spurious d/dt term
-      //  and the residual/Jacobian would no longer treat them as algebraic.)
+      // FESystem(FE_DGQ, 2) shape functions are
+      // component-specific: phi_i is nonzero only for its
+      // component, so M(i,j) = 0 whenever component(i)!=
+      // component(j).  We must skip cross-component pairs;
+      // otherwise M has zero rows/columns and gauss_jordan()
+      // aborts. Only the cell components (0,1) carry a mass term;
+      // the FE_DGQ(1) trace components (2,3) are algebraic, so
+      // their rows/cols of M stay zero. (Without this, alpha*M
+      // would give the trace DOFs a spurious d/dt term
+      //  and the residual/Jacobian would no longer treat them as
+      //  algebraic.)
       for (unsigned int q = 0; q < fev.n_quadrature_points; ++q)
         for (unsigned int i = 0; i < n_dofs; ++i)
           {
@@ -951,18 +1147,21 @@ BloodFlowSystem<dim, spacedim>::build_per_cell_mass_inv()
               {
                 const unsigned int cj = fe->system_to_component_index(j).first;
                 if (ci != cj)
-                  continue; // cross-component integral is identically zero
+                  continue; // cross-component integral is
+                            // identically zero
                 M(i, j) +=
                   fev.shape_value(i, q) * fev.shape_value(j, q) * fev.JxW(q);
               }
           }
 
-      // Forward mass keeps the zero trace block (used as alpha*M in the
-      // Jacobian and as M*ydot in the residual, both restricted to cell rows).
+      // Forward mass keeps the zero trace block (used as alpha*M
+      // in the Jacobian and as M*ydot in the residual, both
+      // restricted to cell rows).
       per_cell_mass_[cell->id()] = M;
 
-      // For the (only-diagnostic) inverse, put 1 on the trace diagonal so the
-      // dense inverse exists; the trace block of the inverse is never applied.
+      // For the (only-diagnostic) inverse, put 1 on the trace
+      // diagonal so the dense inverse exists; the trace block of
+      // the inverse is never applied.
       FullMatrix<double> M_inv(M);
       for (unsigned int i = 0; i < n_dofs; ++i)
         if (fe->system_to_component_index(i).first >= 2)
@@ -972,9 +1171,11 @@ BloodFlowSystem<dim, spacedim>::build_per_cell_mass_inv()
     }
 }
 
-// ---------- open_csv_files --------------------------------------------------
-// One CSV per vessel:  HDG_IDA_Vessel_<vid>.csv  (ascending vessel id).
-// Each file gets a row [time, P, Q, A, U] at the vessel's arc-length midpoint.
+// ---------- open_csv_files
+// -------------------------------------------------- One CSV per
+// vessel:  HDG_IDA_Vessel_<vid>.csv  (ascending vessel id). Each
+// file gets a row [time, P, Q, A, U] at the vessel's arc-length
+// midpoint.
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::open_csv_files()
@@ -987,7 +1188,8 @@ BloodFlowSystem<dim, spacedim>::open_csv_files()
   csv_vessel_.clear();
   probe_targets_.clear();
 
-  // 1. Distinct vessel ids present in the mesh. std::set => ascending order,
+  // 1. Distinct vessel ids present in the mesh. std::set =>
+  // ascending order,
   //    which gives ascending file numbering.
   std::set<unsigned int> vessel_ids;
   for (const auto &cell : dof_handler.active_cell_iterators())
@@ -995,7 +1197,8 @@ BloodFlowSystem<dim, spacedim>::open_csv_files()
 
   const std::string hdr = "time_s,P_dynpcm2,Q_cm3ps,A_cm2,U_cmps\n";
 
-  // 2. For each vessel, locate the cell nearest its arc-length midpoint and
+  // 2. For each vessel, locate the cell nearest its arc-length
+  // midpoint and
   //   open that vessel's file.
   for (const unsigned int vid : vessel_ids)
     {
@@ -1035,8 +1238,9 @@ BloodFlowSystem<dim, spacedim>::open_csv_files()
     }
 }
 
-// ---------- write_csv_row ---------------------------------------------------
-// Call at each output timestep after the solution is updated.
+// ---------- write_csv_row
+// --------------------------------------------------- Call at
+// each output timestep after the solution is updated.
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::write_csv_row(const double          t,
@@ -1051,7 +1255,8 @@ BloodFlowSystem<dim, spacedim>::write_csv_row(const double          t,
     {
       std::ofstream &os = csv_vessel_.at(vid);
 
-      // Evaluate (A, U) at the cell midpoint via the DG shape functions.
+      // Evaluate (A, U) at the cell midpoint via the DG shape
+      // functions.
       std::vector<types::global_dof_index> ldofs(dofs_per_cell);
       cell->get_dof_indices(ldofs);
 
@@ -1074,7 +1279,8 @@ BloodFlowSystem<dim, spacedim>::write_csv_row(const double          t,
         compute_pressure_value(A_val, vid, compute_a_d_local(cell));
       const double P_dynpcm2 = P_Pa * 10.0;
 
-      // Flow rate Q = A*U [cm^3/s] = [ml/s]  (1 m^3/s = 1e6 ml/s).
+      // Flow rate Q = A*U [cm^3/s] = [ml/s]  (1 m^3/s = 1e6
+      // ml/s).
       const double Q_cm3ps = A_val * U_val * 1.0e6;
 
       os << std::scientific << std::setprecision(8) << t << "," << P_dynpcm2
@@ -1083,7 +1289,8 @@ BloodFlowSystem<dim, spacedim>::write_csv_row(const double          t,
     }
 }
 
-// ---------- close_csv_files -------------------------------------------------
+// ---------- close_csv_files
+// -------------------------------------------------
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::close_csv_files()
@@ -1137,7 +1344,8 @@ BloodFlowSystem<dim, spacedim>::hll_flux(const double       bn_L,
 }
 
 // ============================================================================
-// HLL flux Jacobian (linearised w.r.t. trial perturbations dA_L, dU_L, …)
+// HLL flux Jacobian (linearised w.r.t. trial perturbations dA_L,
+// dU_L, …)
 // ============================================================================
 template <int dim, int spacedim>
 std::array<double, 2>
@@ -1186,8 +1394,8 @@ BloodFlowSystem<dim, spacedim>::hll_flux_jac(const double       bn_L,
            (s_R * FUL_j - s_L * FUR_j + s_R * s_L * (dU_R - dU_L)) * inv}};
 }
 
-// HLL-HDG flux based on Paper "Hybridisable discontinuous Galerkin
-// formulation of compressible flows "
+// HLL-HDG flux based on Paper "Hybridisable discontinuous
+// Galerkin formulation of compressible flows "
 
 template <int dim, int spacedim>
 std::array<double, 2>
@@ -1202,7 +1410,8 @@ BloodFlowSystem<dim, spacedim>::hll_hdg_flux(const double bn_L,
                                              const double /*ad_L*/,
                                              const double ad_R) const
 {
-  // Stabilization from TRACE state only (eq. 37 of Vila-Perez et al.)
+  // Stabilization from TRACE state only (eq. 37 of Vila-Perez et
+  // al.)
   const double c_b    = compute_wave_speed(A_R, vid_R, ad_R);
   const double s_plus = std::max(0.0, U_R * bn_L + c_b); // s⁺ at trace
 
@@ -1337,15 +1546,15 @@ BloodFlowSystem<dim, spacedim>::lf_flux_jac(const double       bn_L,
 //
 // For each cell K:
 //   R_A = \int_K [ F_A(A,U) · \gradφ ] dK
-//         − \Sigma_f  hat{F}_A(A,U ; A_hat,U_hat) [[φ]]  (trace from
-//         face_dof_map)
+//         − \Sigma_f  hat{F}_A(A,U ; A_hat,U_hat) [[φ]]  (trace
+//         from face_dof_map)
 //         + source
 //   R_U similarly, with viscous friction source term.
 //
 // FEValues::get_function_values internally indexes via
-// cell->get_dof_indices(), which only produces indices in [0, n_cell_dofs).
-// We must pass a vector of exactly size n_cell_dofs; the trace block of y is
-// never needed here.
+// cell->get_dof_indices(), which only produces indices in [0,
+// n_cell_dofs). We must pass a vector of exactly size
+// n_cell_dofs; the trace block of y is never needed here.
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -1355,8 +1564,9 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
 {
   TimerOutput::Scope timer(computing_timer, "assemble_cell_residuals");
 
-  // Extract the cell sub-block once.  All FEValues::get_function_values calls
-  // below receive y_cell (size n_cell_dofs) — consistent with dof_handler.
+  // Extract the cell sub-block once.  All
+  // FEValues::get_function_values calls below receive y_cell
+  // (size n_cell_dofs) — consistent with dof_handler.
   Vector<double> y_cell(
     dof_handler.n_dofs()); // full FE range (cell+trace comps)
   for (types::global_dof_index i = 0; i < dof_handler.n_dofs(); ++i)
@@ -1408,7 +1618,8 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
           const double U = U_h[q];
           const double P =
             compute_pressure_value(A, vid, compute_a_d_local(cell));
-          // const double              P = compute_pressure_value(A, vid);
+          // const double              P =
+          // compute_pressure_value(A, vid);
           const Tensor<1, spacedim> b = compute_directional_vector(cell);
 
           const double rhs_A =
@@ -1456,11 +1667,12 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
           fef[area_extractor].get_function_values(y_cell, Ah_q);
           fef[velocity_extractor].get_function_values(y_cell, Uh_q);
 
-          // Face-trace values: this cell's OWN (A_hat, U_hat) on face f,
-          // read with the same extractor idiom as the cell values.  For
-          // boundary faces and K>=3 junction half-faces this DOF *is* the
-          // unique/per-vessel trace; on an ordinary interior (or 2-way) face
-          // it is tied to the canonical side by the continuity rows, so the
+          // Face-trace values: this cell's OWN (A_hat, U_hat) on
+          // face f, read with the same extractor idiom as the
+          // cell values.  For boundary faces and K>=3 junction
+          // half-faces this DOF *is* the unique/per-vessel trace;
+          // on an ordinary interior (or 2-way) face it is tied to
+          // the canonical side by the continuity rows, so the
           // converged value is identical to the canonical one.
           std::vector<double> Ahat_q(fef.n_quadrature_points);
           std::vector<double> Uhat_q(fef.n_quadrature_points);
@@ -1477,8 +1689,8 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
                 compute_tangent_normal_product(cell, normals[q]);
 
               // numerical_flux designed for left/right states.
-              // In current implementation there is no physical neighbour cell
-              // on the other side so we are ;
+              // In current implementation there is no physical
+              // neighbour cell on the other side so we are ;
 
               const auto [FA, FU] = numerical_flux(
                 bn, bn, A_in, U_in, A_hat, U_hat, vid, vid, ad_local, ad_face);
@@ -1488,7 +1700,8 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
                   const unsigned int comp =
                     fe->system_to_component_index(i).first;
                   if (comp >= 2)
-                    continue; // trace components carry no cell flux
+                    continue; // trace components carry no cell
+                              // flux
                   cell_rhs(i) -=
                     (comp == 0 ? FA : FU) * fef.shape_value(i, q) * JxW[q];
                 }
@@ -1505,17 +1718,17 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
 // ============================================================================
 // assemble_trace_interior_equations
 //
-// For each unique interior (non-junction) face shared by cells L and R,
-// enforce conservation of numerical flux:
+// For each unique interior (non-junction) face shared by cells L
+// and R, enforce conservation of numerical flux:
 //
 //   Fhat_L(W_L, What) + Fhat_R(W_R, What) = 0
 //
 // where
 //   R_A = FA_L + Fa_R
 //   R_U = FU_L + FU_R
-// and W_L, W_R are the interior states at the face from the left and right
-// cells, respectively, and W_hat is the trace state at the face (from
-// face_dof_map).
+// and W_L, W_R are the interior states at the face from the left
+// and right cells, respectively, and W_hat is the trace state at
+// the face (from face_dof_map).
 // ============================================================================
 
 template <int dim, int spacedim>
@@ -1544,7 +1757,8 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_interior_equations(
                                   quad_face,
                                   update_values | update_normal_vectors);
 
-  // Avoid double assembly of the same face from left and right cells
+  // Avoid double assembly of the same face from left and right
+  // cells
   std::set<std::pair<CellId, unsigned int>> processed;
 
   for (const auto &cell : dof_handler.active_cell_iterators())
@@ -1595,15 +1809,16 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_interior_equations(
           get_face_trace(y, cell, f, A_hat, U_hat);
           A_hat = std::max(A_hat, 1e-10);
 
-          // Left HDG type flux residuals (face integrals with interior state
-          // from left cell) numerical_flux is designed for left/right states.
-          // The trace acts as the exterior state, therefore use
-          // opposite orientation on the trace side.
+          // Left HDG type flux residuals (face integrals with
+          // interior state from left cell) numerical_flux is
+          // designed for left/right states. The trace acts as the
+          // exterior state, therefore use opposite orientation on
+          // the trace side.
           const auto [FA_L, FU_L] = numerical_flux(
             bn_L, bn_L, A_L, U_L, A_hat, U_hat, vid_L, vid_R, ad_L, ad_face);
 
-          // Right HDG type flux residuals (face integrals with interior state
-          // from right cell)
+          // Right HDG type flux residuals (face integrals with
+          // interior state from right cell)
           const auto [FA_R, FU_R] = numerical_flux(
             bn_R, bn_R, A_R, U_R, A_hat, U_hat, vid_R, vid_L, ad_R, ad_face);
 
@@ -1621,23 +1836,25 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_interior_equations(
 // ============================================================================
 // assemble_trace_boundary_equations
 //
-// Each boundary face (non-junction) gets two residual equations for its
-// trace pair (A_hat, U_hat):
+// Each boundary face (non-junction) gets two residual equations
+// for its trace pair (A_hat, U_hat):
 //
 //   bid == 0  (inflow):
-//     R_a = A_hat * U_hat − Q_in(t) = 0          (prescribed volumetric flow)
-//     R_u = [U_hat − 4(c_hat − c0)] − W2_int = 0 (outgoing Riemann compat.)
+//     R_a = A_hat * U_hat − Q_in(t) = 0          (prescribed
+//     volumetric flow) R_u = [U_hat − 4(c_hat − c0)] − W2_int = 0
+//     (outgoing Riemann compat.)
 //           W2_int = U_int − 4(c_int − c0)
 //
 //   bid != 0 + RCR:
-//     R_a = P(A_hat) − [R1 * A_hat*u_hat + Pc] = 0         (Windkessel
-//     pressure BC) R_u = [U_hat + 4(c_hat − c0)] − W1_int = 0 (incoming
-//     Riemann compat.)
+//     R_a = P(A_hat) − [R1 * A_hat*u_hat + Pc] = 0 (Windkessel
+//     pressure BC) R_u = [U_hat + 4(c_hat − c0)] − W1_int = 0
+//     (incoming Riemann compat.)
 //           W1_int = U_int + 4(c_int − c0)
 //
 //   bid != 0 + Reflection:
-//     R_a = [U_hat + 4(c_hat − c0)] − W1_int = 0 (forward compat.)
-//     R_u = [U_hat − 4(c_hat − c0)] − W2_tgt = 0 (backward: −Rt * W1_int)
+//     R_a = [U_hat + 4(c_hat − c0)] − W1_int = 0 (forward
+//     compat.) R_u = [U_hat − 4(c_hat − c0)] − W2_tgt = 0
+//     (backward: −Rt * W1_int)
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -1715,10 +1932,10 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_boundary_equations(
               const double Q   = A_hat_cur * U_hat_cur;
               if (rcr.C > 0.0)
                 {
-                  // const double Pc = terminal_Pc_storage.at(bid);
-                  // res_A =
-                  //   compute_pressure_value(A_hat, vid, a_d_local) - (rcr.R1 *
-                  //   Q + Pc);
+                  // const double Pc =
+                  // terminal_Pc_storage.at(bid); res_A =
+                  //   compute_pressure_value(A_hat, vid,
+                  //   a_d_local) - (rcr.R1 * Q + Pc);
                   const double Pc = y[rcr_pc_dof.at(bid)];
                   res_A = compute_pressure_value(A_hat, vid, a_d_local) -
                           (rcr.R1 * Q + Pc);
@@ -1752,8 +1969,8 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_boundary_equations(
 // assemble_rcr_capacitance_equations
 // For each RCR outlet, enforce the capacitance relation:
 //   dP/dt = (P - R2*Q - P_out) / (R1*C)
-// where P = P(A_hat) is the pressure at the outlet face (from trace state), Q =
-// A_hat * U_hat
+// where P = P(A_hat) is the pressure at the outlet face (from
+// trace state), Q = A_hat * U_hat
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -1793,9 +2010,9 @@ BloodFlowSystem<dim, spacedim>::assemble_rcr_capacitor_equations(
 // ============================================================================
 // assemble_trace_junction_equations
 //
-// At a K-way junction the 2K trace unknowns {A_hat_i, U_hat_i} for
-// i = 0 … K−1 must satisfy: ( here K>=2 , K=2 , 2 way junction otherwise K>2
-// multi-way junction)
+// At a K-way junction the 2K trace unknowns {A_hat_i, U_hat_i}
+// for i = 0 … K−1 must satisfy: ( here K>=2 , K=2 , 2 way
+// junction otherwise K>2 multi-way junction)
 //
 //   (a) Mass conservation  (1 equation):
 //         sum_i [ s_i * A_hat_i * U_hat_i ] = 0
@@ -1806,18 +2023,21 @@ BloodFlowSystem<dim, spacedim>::assemble_rcr_capacitor_equations(
 //   (c) Riemann compatibility  (K equations):
 //         U_hat_i + s_i * 4(c_hat_i − c0_i) − W_i = 0
 //         where  W_i = U_int_i + s_i * 4(c_int_i − c0_i)
-//                is the outgoing Riemann invariant from cell i's interior.
+//                is the outgoing Riemann invariant from cell i's
+//                interior.
 //
 // Total: 1 + (K−1) + K = 2K equations.
 //
 // Row assignment to avoid collision:
 //   a_idx[0]          -> (a) mass conservation
-//   u_idx[0..K−2]     -> (b) total-head continuity for vessels 1..K−1
-//   u_idx[K−1]        -> (c) Riemann compat. for vessel 0
-//   a_idx[1..K−1]     -> (c) Riemann compat. for vessels 1..K−1
+//   u_idx[0..K−2]     -> (b) total-head continuity for
+//   vessels 1..K−1 u_idx[K−1]        -> (c) Riemann compat. for
+//   vessel 0 a_idx[1..K−1]     -> (c) Riemann compat. for
+//   vessels 1..K−1
 //
-// FEFaceValues::get_function_values uses y_cell (size n_cell_dofs).
-// Trace values are read directly from the trace block of y.
+// FEFaceValues::get_function_values uses y_cell (size
+// n_cell_dofs). Trace values are read directly from the trace
+// block of y.
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -1871,16 +2091,18 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
 
           A_int[i] = std::max(Av[0], A_min);
           U_int[i] = Uv[0];
-          s[i]     = hf.orientation; // +1 if junction is at face 1 (right end)
+          s[i]     = hf.orientation; // +1 if junction is at face 1
+                                     // (right end)
           const double a_d_face = compute_a_d_at_face(hf.cell, hf.face_no);
           c0[i]                 = compute_wave_speed(a_d_face, vid, a_d_face);
 
-          // Outgoing Riemann invariant from cell i toward the junction
+          // Outgoing Riemann invariant from cell i toward the
+          // junction
           const double c_i = compute_wave_speed(A_int[i], vid, a_d_face);
           W[i] = U_int[i] + static_cast<double>(s[i]) * 4.0 * (c_i - c0[i]);
 
-          // Trace DOF indices and current trace values (from trace block of
-          // y)
+          // Trace DOF indices and current trace values (from
+          // trace block of y)
           const FaceTraceDof &td =
             face_dof_map.at(canonical_face_key(hf.cell, hf.face_no));
           a_idx[i] = td.a_hat_dof;
@@ -1899,12 +2121,13 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
         F[a_idx[0]] = mass_res;
       }
 
-      // (b) Total-head continuity: H_0 − H_i = 0 -> rows u_idx[0..K−2]
+      // (b) Total-head continuity: H_0 − H_i = 0 -> rows
+      // u_idx[0..K−2]
       {
         const double a_d0 =
           compute_a_d_at_face(J.half_faces[0].cell, J.half_faces[0].face_no);
         const double H0 =
-          0.5 * 0.8 * U_hat[0] * U_hat[0] + // 0.8 just a factor for testing
+          0.5 * theta * U_hat[0] * U_hat[0] +
           compute_pressure_value(A_hat[0],
                                  J.half_faces[0].cell->material_id(),
                                  a_d0) /
@@ -1915,7 +2138,7 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
             const double a_di = compute_a_d_at_face(J.half_faces[i].cell,
                                                     J.half_faces[i].face_no);
             const double Hi =
-              0.5 * 0.8 * U_hat[i] * U_hat[i] + // 0.8 just a factor for testing
+              0.5 * theta * U_hat[i] * U_hat[i] +
               compute_pressure_value(A_hat[i],
                                      J.half_faces[i].cell->material_id(),
                                      a_di) /
@@ -1925,7 +2148,8 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
           }
       }
 
-      // (c) Riemann compatibility: U_hat_i + s_i*4(c_hat_i−c0_i) − W_i = 0
+      // (c) Riemann compatibility: U_hat_i + s_i*4(c_hat_i−c0_i)
+      // − W_i = 0
       //     vessel 0 -> row u_idx[K−1]
       //     vessel i>=1 -> row a_idx[i]
       for (unsigned int i = 0; i < K; ++i)
@@ -1945,12 +2169,16 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
 // ============================================================================
 // assemble_trace_continuity_equations
 //
-// Each ordinary interior face now has two FE trace DOF pairs (one per side,
-// because FE_DGQ is discontinuous).  The canonical side carries the interior
-// Riemann/flux trace equation (assemble_trace_interior_equations); the
-// duplicate side is:
-//     F[a_dup] = A_hat_dup - A_hat_canon ,   F[u_dup] = U_hat_dup -
-//     U_hat_canon.
+// Each ordinary interior face now has two FE trace DOF pairs (one
+// per side, because FE_DGQ is discontinuous).  The canonical side
+// carries the interior Riemann/flux trace equation
+// (assemble_trace_interior_equations); the duplicate side is
+// pinned to it here:
+//     F[a_dup] = A_hat_dup - A_hat_canon ,   F[u_dup] = U_hat_dup
+//     - U_hat_canon.
+// Written in "+F" form (same convention as the other trace
+// routines); the algebraic loop in assemble_residual flips the
+// sign to -F.
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -1970,9 +2198,9 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_continuity_equations(
 // ============================================================================
 // assemble_jacobian_trace_continuity_block
 //
-// d(+F)/dy for the continuity rows:  +1 on the duplicate DOF, -1 on the
-// master.  The global *= -1 in assemble_jacobian turns these into the
-// residual-consistent -1 / +1.
+// d(+F)/dy for the continuity rows:  +1 on the duplicate DOF, -1
+// on the master.  The global *= -1 in assemble_jacobian turns
+// these into the residual-consistent -1 / +1.
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -1993,11 +2221,12 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_continuity_block()
 // ARKode calls this to evaluate  f(t, y)  where the system is
 //   dy/dt = f(t, y)   with M_ARKode = I.
 //
-// For cell DOFs: f_cell = M_K^-1 * F_cell(y)  (apply per-cell inverse mass)
-// For trace DOFs: f_trace = F_trace(y)         (algebraic — returned as-is)
+// For cell DOFs: f_cell = M_K^-1 * F_cell(y)  (apply per-cell
+// inverse mass) For trace DOFs: f_trace = F_trace(y) (algebraic —
+// returned as-is)
 //
-// ARKode drives  dy/dt = f(t,y) and enforces  F_trace = 0 as a stiff
-// algebraic constraint through its implicit solver.
+// ARKode drives  dy/dt = f(t,y) and enforces  F_trace = 0 as a
+// stiff algebraic constraint through its implicit solver.
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -2013,22 +2242,25 @@ BloodFlowSystem<dim, spacedim>::assemble_residual(const double          t,
   AssertDimension(ydot.size(), n_total_dofs);
   residual.reinit(n_total_dofs);
 
-  // ---- Assemble raw residuals for all DOFs --------------------------------
+  // ---- Assemble raw residuals for all DOFs
+  // --------------------------------
   assemble_cell_residuals(t, y, residual);
   assemble_trace_interior_equations(y, residual);
   assemble_trace_boundary_equations(t, y, residual);
   assemble_trace_junction_equations(y, residual);
   assemble_trace_continuity_equations(y, residual); // duplicate-side ties
 
-  // ---- residual = M_K * ydot - F   (uniformly, over the WHOLE FE range) ---
-  // per_cell_mass_ has an exactly-zero block on the trace components (2,3),
-  // so this single formula produces the right thing for both kinds of row:
+  // ---- residual = M_K * ydot - F   (uniformly, over the WHOLE
+  // FE range) --- per_cell_mass_ has an exactly-zero block on the
+  // trace components (2,3), so this single formula produces the
+  // right thing for both kinds of row:
   //   cell rows  (differential):  M ydot - F_cell
   //   trace rows (algebraic)   :  0      - F_trace  =  -F_trace
   // This mirrors assemble_jacobian(), which likewise applies
-  // (-dR/dy + alpha*M) uniformly and relies on M's zero trace block.
-  // Every FE DOF (including the discontinuous trace DOFs) belongs to exactly
-  // one cell, so each row is written exactly once.
+  // (-dR/dy + alpha*M) uniformly and relies on M's zero trace
+  // block. Every FE DOF (including the discontinuous trace DOFs)
+  // belongs to exactly one cell, so each row is written exactly
+  // once.
   const unsigned int n_dofs = fe->n_dofs_per_cell();
   Vector<double>     local_F(n_dofs), local_Mydot(n_dofs), local_res(n_dofs);
 
@@ -2054,8 +2286,8 @@ BloodFlowSystem<dim, spacedim>::assemble_residual(const double          t,
 // ============================================================================
 // assemble_jacobian_cell_block
 //
-// Differentiates the cell residuals w.r.t. cell DOFs (block 1,1) and
-// w.r.t. trace DOFs (block 1,2).
+// Differentiates the cell residuals w.r.t. cell DOFs (block 1,1)
+// and w.r.t. trace DOFs (block 1,2).
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -2106,7 +2338,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
 
       FullMatrix<double> cell_matrix(n_dofs, n_dofs);
 
-      // ---- Block (1,1) volume - cell_matrix -------------------------------
+      // ---- Block (1,1) volume - cell_matrix
+      // -------------------------------
       for (unsigned int q = 0; q < fev.n_quadrature_points; ++q)
         {
           const double A    = std::max(A_h[q], 1e-10);
@@ -2142,8 +2375,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
             }
         }
 
-      // ---- Block (1,1) face + Block (1,2) ---------------------------------
-      // Face cell-cell -> cell_matrix
+      // ---- Block (1,1) face + Block (1,2)
+      // --------------------------------- Face cell-cell ->
+      // cell_matrix
 
       for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
         {
@@ -2156,9 +2390,10 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
           fef[area_extractor].get_function_values(y_cell, Ah_q);
           fef[velocity_extractor].get_function_values(y_cell, Uh_q);
 
-          // This cell's OWN trace values / DOFs on face f — must match the
-          // extractor read in assemble_cell_residuals, otherwise the analytic
-          // Jacobian differentiates w.r.t. the wrong column.
+          // This cell's OWN trace values / DOFs on face f — must
+          // match the extractor read in assemble_cell_residuals,
+          // otherwise the analytic Jacobian differentiates w.r.t.
+          // the wrong column.
           std::vector<double> Ahat_q(fef.n_quadrature_points);
           std::vector<double> Uhat_q(fef.n_quadrature_points);
           fef[a_hat_extractor].get_function_values(y_cell, Ahat_q);
@@ -2246,7 +2481,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
                 }
             }
         }
-      // Single scatter: volume + face cell-cell -> jacobian_matrix
+      // Single scatter: volume + face cell-cell ->
+      // jacobian_matrix
 
       for (unsigned int i = 0; i < n_dofs; ++i)
         for (unsigned int j = 0; j < n_dofs; ++j)
@@ -2265,7 +2501,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
 // Blocks filled:
 //   (trace, cell_L)  : dR / d w_L  via left HLL flux jacobian
 //   (trace, cell_R)  : dR / d w_R  via right HLL flux jacobian
-//   (trace, trace)   : dR / d(A_hat, U_hat) summed from both fluxes
+//   (trace, trace)   : dR / d(A_hat, U_hat) summed from both
+//   fluxes
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -2313,7 +2550,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
           const double       ad_L    = compute_a_d_local(cell);
           const double       ad_R    = compute_a_d_local(nb);
           const double       ad_face = compute_a_d_at_face(cell, f);
-          // ---- Left cell: state and normal --------------------------------
+          // ---- Left cell: state and normal
+          // --------------------------------
           fef.reinit(cell, f);
           const double bn_L =
             compute_tangent_normal_product(cell, fef.get_normal_vectors()[0]);
@@ -2355,8 +2593,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
 
           // ================================================================
           // Block (trace, cell_L): dR/dw_L
-          // Linearise F_hat(bn_L,bn_L, A_L,U_L, A_hat,U_hat) w.r.t. w_L.
-          // Interior = L (trial nonzero), exterior = trace (trial zero).
+          // Linearise F_hat(bn_L,bn_L, A_L,U_L, A_hat,U_hat)
+          // w.r.t. w_L. Interior = L (trial nonzero), exterior =
+          // trace (trial zero).
           // ================================================================
           fef.reinit(cell, f);
           for (unsigned int j = 0; j < fe->n_dofs_per_cell(); ++j)
@@ -2386,8 +2625,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
 
           // ================================================================
           // Block (trace, cell_R): dR/dw_R
-          // Linearise F_hat(bn_R,bn_R, A_R,U_R, A_hat,U_hat) w.r.t. w_R.
-          // Interior = R (trial nonzero), exterior = trace (trial zero).
+          // Linearise F_hat(bn_R,bn_R, A_R,U_R, A_hat,U_hat)
+          // w.r.t. w_R. Interior = R (trial nonzero), exterior =
+          // trace (trial zero).
           // ================================================================
           fef.reinit(nb, nb_f);
           for (unsigned int j = 0; j < fe->n_dofs_per_cell(); ++j)
@@ -2418,16 +2658,17 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
           // ================================================================
           // Block (trace, trace): dR/d(A_hat, U_hat)
           // Trace appears as the EXTERIOR state in both fluxes.
-          // Contribution from left flux: trial on exterior = (dA_hat,
-          // dU_hat). Contribution from right flux: same trial. Sum both
-          // contributions.
+          // Contribution from left flux: trial on exterior =
+          // (dA_hat, dU_hat). Contribution from right flux: same
+          // trial. Sum both contributions.
           // ================================================================
           // Unit perturbations in A_hat and U_hat:
           for (const auto &[dA_hat_trial, dU_hat_trial, col] :
                {std::tuple{1.0, 0.0, td.a_hat_dof},
                 std::tuple{0.0, 1.0, td.u_hat_dof}})
             {
-              // Left flux: exterior trial = (dA_hat_trial, dU_hat_trial)
+              // Left flux: exterior trial = (dA_hat_trial,
+              // dU_hat_trial)
               const auto [dFA_L, dFU_L] =
                 numerical_flux_jac(bn_L,
                                    bn_L,
@@ -2444,7 +2685,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
                                    ad_L,
                                    ad_face);
 
-              // Right flux: exterior trial = (dA_hat_trial, dU_hat_trial)
+              // Right flux: exterior trial = (dA_hat_trial,
+              // dU_hat_trial)
               const auto [dFA_R, dFU_R] =
                 numerical_flux_jac(bn_R,
                                    bn_R,
@@ -2516,7 +2758,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
           const double A_int     = std::max(A_int_v[0], 1e-10);
           const double a_d_local = compute_a_d_at_face(cell, f);
           // const double U_int  = U_int_v[0];
-          // const double c0     = compute_wave_speed(vpp.a_d, vid);
+          // const double c0     = compute_wave_speed(vpp.a_d,
+          // vid);
           const double dc_int =
             compute_wave_speed_derivative(A_int, vid, a_d_local);
 
@@ -2542,11 +2785,13 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
               // R2 = U_hat - 4(c_hat - c0) - W2_int
               // where W2_int = U_int - 4(c_int - c0)
 
-              // \partialR1/ \partialA_hat, \partialR1/ \partialU_hat
+              // \partialR1/ \partialA_hat, \partialR1/
+              // \partialU_hat
               jacobian_matrix.add(a_row, a_row, U_hat_cur);
               jacobian_matrix.add(a_row, u_row, A_hat);
 
-              // \partialR2/\partialA_hat, \partialR2/\partialU_hat
+              // \partialR2/\partialA_hat,
+              // \partialR2/\partialU_hat
               jacobian_matrix.add(u_row, a_row, -4.0 * dc_hat);
               jacobian_matrix.add(u_row, u_row, 1.0);
 
@@ -2555,7 +2800,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
                 {
                   const double phi_A = fef[area_extractor].value(j, 0);
                   const double phi_U = fef[velocity_extractor].value(j, 0);
-                  // \partialW2_int/\partialw_int = phi_U - 4*dc_int*phi_A
+                  // \partialW2_int/\partialw_int = phi_U -
+                  // 4*dc_int*phi_A
                   jacobian_matrix.add(u_row,
                                       ldofs[j],
                                       -(phi_U - 4.0 * dc_int * phi_A));
@@ -2602,9 +2848,10 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
                   // res_A = P(A_hat) - R2*(A_hat*U_hat) - P_out
                   // res_U = U_hat + 4(c_hat - c0) - W1_int
                   //
-                  // dres_A/dA_hat = dP/dA_hat - R2*U_hat   (same form as RCR
-                  // with R2) dres_A/dU_hat = -R2*A_hat               (R2
-                  // replaces R1) Pc term drops out (no capacitor, no time
+                  // dres_A/dA_hat = dP/dA_hat - R2*U_hat   (same
+                  // form as RCR with R2) dres_A/dU_hat =
+                  // -R2*A_hat               (R2 replaces R1) Pc
+                  // term drops out (no capacitor, no time
                   // derivative)
                   jacobian_matrix.add(a_row,
                                       a_row,
@@ -2613,7 +2860,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
 
                   // dres_U/dA_hat = 4*dc_hat
                   // dres_U/dU_hat = 1
-                  // (identical to RCR — res_U has no R dependence)
+                  // (identical to RCR — res_U has no R
+                  // dependence)
                   jacobian_matrix.add(u_row, a_row, 4.0 * dc_hat);
                   jacobian_matrix.add(u_row, u_row, 1.0);
 
@@ -2635,15 +2883,18 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
               // R1 = U_hat + 4(c_hat - c0) - W1_int
               // R2 = U_hat - 4(c_hat - c0) - (-Rt * W1_int)
 
-              // \partialR1/\partialA_hat, \partialR1/\partialU_hat
+              // \partialR1/\partialA_hat,
+              // \partialR1/\partialU_hat
               jacobian_matrix.add(a_row, a_row, 4.0 * dc_hat);
               jacobian_matrix.add(a_row, u_row, 1.0);
 
-              // \partialR2/\partialA_hat, \partialR2/\partialU_hat
+              // \partialR2/\partialA_hat,
+              // \partialR2/\partialU_hat
               jacobian_matrix.add(u_row, a_row, -4.0 * dc_hat);
               jacobian_matrix.add(u_row, u_row, 1.0);
 
-              // \partialR1 and \partialR2 /\partial(A_int,U_int) via W1_int
+              // \partialR1 and \partialR2 /\partial(A_int,U_int)
+              // via W1_int
               for (unsigned int j = 0; j < fe->n_dofs_per_cell(); ++j)
                 {
                   const double phi_A = fef[area_extractor].value(j, 0);
@@ -2659,9 +2910,10 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
 
 //================================================
 // assemble_rcr_capacitor_equations in jacobian assembly
-// RCR capacitor equations are ODEs, so their Jacobian contributions are just
-// the derivatives of the residual w.r.t. the capacitor state DOFs (no coupling
-// to cell DOFs, no dependence on trace DOFs).
+// RCR capacitor equations are ODEs, so their Jacobian
+// contributions are just the derivatives of the residual w.r.t.
+// the capacitor state DOFs (no coupling to cell DOFs, no
+// dependence on trace DOFs).
 //=========================================================
 template <int dim, int spacedim>
 void
@@ -2702,8 +2954,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_rcr_capacitor_block(
 // ============================================================================
 // assemble_jacobian_trace_junction_block
 //
-// Differentiates the junction residuals (mass conservation, total-head
-// continuity, Riemann compatibility) w.r.t. all cell and trace DOFs.
+// Differentiates the junction residuals (mass conservation,
+// total-head continuity, Riemann compatibility) w.r.t. all cell
+// and trace DOFs.
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -2760,8 +3013,10 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
           dc_int_v[i] = compute_wave_speed_derivative(A_int[i], vid, a_d_face);
 
 
-          // c0[i]       = compute_wave_speed(vessel_map.at(vid).a_d, vid);
-          // dc_int_v[i] = compute_wave_speed_derivative(A_int[i], vid);
+          // c0[i]       =
+          // compute_wave_speed(vessel_map.at(vid).a_d, vid);
+          // dc_int_v[i] = compute_wave_speed_derivative(A_int[i],
+          // vid);
 
           const auto  key = canonical_face_key(hf.cell, hf.face_no);
           const auto &td  = face_dof_map.at(key);
@@ -2779,7 +3034,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
           hf.cell->get_dof_indices(cell_dofs[i]);
         }
 
-      // Row a_row[0]: mass conservation \sum s_i A_hat_i U_hat_i = 0
+      // Row a_row[0]: mass conservation \sum s_i A_hat_i U_hat_i
+      // = 0
       for (unsigned int i = 0; i < K; ++i)
         {
           const double s = static_cast<double>(orient[i]);
@@ -2790,16 +3046,14 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
       // Rows u_row[0..K-2]: H_0 − H_i = 0
       for (unsigned int i = 1; i < K; ++i)
         {
-          // \partialH_0/\partialA_hat_0 , \partialH_0/\partialU_hat_0
+          // \partialH_0/\partialA_hat_0 ,
+          // \partialH_0/\partialU_hat_0
           jacobian_matrix.add(u_row[i - 1], a_row[0], dP_hat[0] / rho);
-          jacobian_matrix.add(u_row[i - 1],
-                              u_row[0],
-                              0.8 * U_hat[0]); // coreesponding to residual
-          //  \partial(-H_i)/\partialA_hat_i, \partial(-H_i)/\partialU_hat_i
+          jacobian_matrix.add(u_row[i - 1], u_row[0], theta * U_hat[0]);
+          //  \partial(-H_i)/\partialA_hat_i,
+          //  \partial(-H_i)/\partialU_hat_i
           jacobian_matrix.add(u_row[i - 1], a_row[i], -dP_hat[i] / rho);
-          jacobian_matrix.add(u_row[i - 1],
-                              u_row[i],
-                              -0.8 * U_hat[i]); // corresponding to residual
+          jacobian_matrix.add(u_row[i - 1], u_row[i], -theta * U_hat[i]);
         }
 
       // Compat row for vessel 0 -> u_row[K-1]
@@ -2809,8 +3063,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
           const double                  s  = static_cast<double>(orient[i]);
           const types::global_dof_index rr = (i == 0) ? u_row[K - 1] : a_row[i];
 
-          // \partial/\partialA_hat_i, \partial/\partialU_hat_i of (U_hat_i +
-          // s*4(c_hat_i - c0_i) - W_i)
+          // \partial/\partialA_hat_i, \partial/\partialU_hat_i of
+          // (U_hat_i + s*4(c_hat_i - c0_i) - W_i)
           jacobian_matrix.add(rr, a_row[i], s * 4.0 * dc_hat_v[i]);
           jacobian_matrix.add(rr, u_row[i], 1.0);
 
@@ -2822,7 +3076,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
             {
               const double phi_A = fef[area_extractor].value(j, 0);
               const double phi_U = fef[velocity_extractor].value(j, 0);
-              // \partialW_i/\partialw = phi_U + s*4*dc_int_v[i]*phi_A
+              // \partialW_i/\partialw = phi_U +
+              // s*4*dc_int_v[i]*phi_A
               const double dW = phi_U + s * 4.0 * dc_int_v[i] * phi_A;
               jacobian_matrix.add(rr, cell_dofs[i][j], -dW);
             }
@@ -2834,13 +3089,14 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
 // ============================================================================
 // assemble_jacobian
 //
-// Builds  J = d f(t,y) / d y  where f = [M_K^-1 F_cell ; F_trace].
+// Builds  J = d f(t,y) / d y  where f = [M_K^-1 F_cell ;
+// F_trace].
 //
 // Cell rows:  J_cell_rows = M_K^-1 * (d F_cell / d y)
 // Trace rows: J_trace_rows = d F_trace / d y  (unchanged)
 //
-// We assemble d F / d y first, then apply M_K^-1 row-by-row to the
-// cell rows only.
+// We assemble d F / d y first, then apply M_K^-1 row-by-row to
+// the cell rows only.
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -2857,7 +3113,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian(
   AssertDimension(y.size(), n_total_dofs);
   jacobian_matrix = 0;
 
-  // ---- Assemble raw d F / d y ---------------------------------------------
+  // ---- Assemble raw d F / d y
+  // ---------------------------------------------
   assemble_jacobian_cell_block(t, y);
   assemble_jacobian_trace_interior_block(y);
   assemble_jacobian_trace_boundary_block(t, y);
@@ -2865,14 +3122,16 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian(
   assemble_jacobian_trace_continuity_block(); // NEW
   assemble_jacobian_rcr_capacitor_block(y);
 
-  // ---- Negate: dF/dy = −dR/dy -------------------------------------------
-  // Residual is F = M*ydot − R_cell (cell) and F = −R_trace (trace)
-  // so dF/dy = −dR/dy for both blocks.
+  // ---- Negate: dF/dy = −dR/dy
+  // ------------------------------------------- Residual is F =
+  // M*ydot − R_cell (cell) and F = −R_trace (trace) so dF/dy =
+  // −dR/dy for both blocks.
   jacobian_matrix *= -1.0;
 
   // ---- Add alpha*M_K to cell-block (dF/dydot term)
-  // --------------------------- J_IDA = dF/dy + alpha · dF/dẏ = −dR/dy +
-  // alpha · M_block M_block is M_K on cell rows, zero on trace rows.
+  // --------------------------- J_IDA = dF/dy + alpha · dF/dẏ =
+  // −dR/dy + alpha · M_block M_block is M_K on cell rows, zero on
+  // trace rows.
 
   const unsigned int n_dofs = fe->n_dofs_per_cell();
 
@@ -2918,7 +3177,8 @@ BloodFlowSystem<dim, spacedim>::compute_pressure(const Vector<double> &y,
         if (fe->system_to_component_index(i).first == 0)
           {
             const double A = y[ldofs[i]];
-            // p[ldofs[i]]    = compute_pressure_value(A, cell->material_id());
+            // p[ldofs[i]]    = compute_pressure_value(A,
+            // cell->material_id());
             p[ldofs[i]] = compute_pressure_value(A,
                                                  cell->material_id(),
                                                  compute_a_d_local(cell));
@@ -2976,7 +3236,8 @@ BloodFlowSystem<dim, spacedim>::output_results(
   const std::string fname =
     output_directory + (output_directory.empty() ? "" : "/") + rel;
 
-  // DataOut works on the full FE range now (4 components: A, U, A_hat, U_hat).
+  // DataOut works on the full FE range now (4 components: A, U,
+  // A_hat, U_hat).
   const types::global_dof_index n_fe = dof_handler.n_dofs();
   Vector<double>                cell_sol(n_fe);
   Vector<double>                cell_p(n_fe);
@@ -3036,10 +3297,11 @@ BloodFlowSystem<dim, spacedim>::compute_errors(const unsigned int k)
 {
   TimerOutput::Scope timer(computing_timer, "compute_errors");
 
-  // NOTE: the FE now has 4 components (A, U, A_hat, U_hat), so the masks
-  // select out of 4 and `exact_solution` MUST be a 4-component Function
-  // (components 2,3 are irrelevant here since they are masked out).  This
-  // routine is meaningful only for manufactured-solution verification runs.
+  // NOTE: the FE now has 4 components (A, U, A_hat, U_hat), so
+  // the masks select out of 4 and `exact_solution` MUST be a
+  // 4-component Function (components 2,3 are irrelevant here
+  // since they are masked out).  This routine is meaningful only
+  // for manufactured-solution verification runs.
   const ComponentSelectFunction<spacedim> area_mask(0, 1.0, 4);
   const ComponentSelectFunction<spacedim> vel_mask(1, 1.0, 4);
 
@@ -3116,17 +3378,23 @@ BloodFlowSystem<dim, spacedim>::run()
   for (unsigned int cycle = 0; cycle < n_refinement_cycles; ++cycle)
     {
       std::cout << "\n--- Refinement cycle " << cycle << " ---\n";
-
+      Triangulation<dim, spacedim> serial_triangulation;
       // ====================================================================
       // 1. MESH + VTK DATA (only on the first refinement cycle)
       // ====================================================================
       if (cycle == 0)
         {
           dealii::GridIn<dim, spacedim> grid_in;
-          grid_in.attach_triangulation(triangulation);
+          grid_in.attach_triangulation(serial_triangulation);
           std::cout << "Reading VTK file: " << vtk_file_path << std::endl;
           std::ifstream mesh_file(vtk_file_path);
           grid_in.read_vtk(mesh_file);
+          std::cout << "Serial cells = "
+                    << serial_triangulation.n_active_cells() << std::endl;
+          for (const auto &cell : serial_triangulation.active_cell_iterators())
+            {
+              std::cout << "material id = " << cell->material_id() << std::endl;
+            }
 
           VTKUtils::read_cell_data(vtk_file_path, "vessel_id", cell_vessel_ids);
           VTKUtils::read_cell_data(vtk_file_path, "a0", cell_a0);
@@ -3167,7 +3435,7 @@ BloodFlowSystem<dim, spacedim>::run()
           // Material IDs + boundary IDs from VTK.
           {
             unsigned int cell_idx = 0;
-            for (auto &cell : triangulation.active_cell_iterators())
+            for (auto &cell : serial_triangulation.active_cell_iterators())
               {
                 cell->set_material_id(
                   static_cast<unsigned int>(cell_vessel_ids[cell_idx]));
@@ -3185,7 +3453,7 @@ BloodFlowSystem<dim, spacedim>::run()
 
           // RCR map.
           rcr_map.clear();
-          for (const auto &cell : triangulation.active_cell_iterators())
+          for (const auto &cell : serial_triangulation.active_cell_iterators())
             for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
               if (cell->face(f)->at_boundary())
                 {
@@ -3202,12 +3470,30 @@ BloodFlowSystem<dim, spacedim>::run()
                     rcr_map[bid] = rcr;
                 }
 
-          triangulation.refine_global(n_global_refinements);
+          serial_triangulation.refine_global(n_global_refinements);
         }
       else
         {
-          triangulation.refine_global(1);
+          serial_triangulation.refine_global(1);
         }
+
+      // MPI block
+      GridTools::partition_triangulation_zorder(Utilities::MPI::n_mpi_processes(
+                                                  mpi_communicator),
+                                                serial_triangulation);
+
+      // Build the description
+      const auto description = TriangulationDescription::Utilities::
+        create_description_from_triangulation(serial_triangulation,
+                                              mpi_communicator);
+
+      // Construct the fully distributed mesh
+      triangulation.create_triangulation(description);
+      std::cout << "Rank " << Utilities::MPI::this_mpi_process(mpi_communicator)
+                << " owns " << triangulation.n_locally_owned_active_cells()
+                << " cells out of " << triangulation.n_global_active_cells()
+                << std::endl;
+
 
       // ====================================================================
       // 2. SYSTEM SETUP
@@ -3285,30 +3571,35 @@ BloodFlowSystem<dim, spacedim>::run()
                   << "  fd=" << fd[worst_i] << "\n";
         // classify worst_i: which trace equation owns it?
         for (const auto &cell : dof_handler.active_cell_iterators())
-          for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-            {
-              const auto key = canonical_face_key(cell, f);
-              const auto it  = face_dof_map.find(key);
-              if (it == face_dof_map.end())
-                continue;
-              if (it->second.a_hat_dof == worst_i ||
-                  it->second.u_hat_dof == worst_i)
-                {
-                  const bool is_a = (it->second.a_hat_dof == worst_i);
-                  std::cout
-                    << "row " << worst_i << " is " << (is_a ? "A_hat" : "U_hat")
-                    << " of face (cell " << cell->id() << ", f=" << f
-                    << ")  vid=" << cell->material_id()
-                    << (cell->face(f)->at_boundary() ? "  BOUNDARY" : "")
-                    << (is_junction_face(cell->id(), f) ? "  JUNCTION" : "")
-                    << (!cell->face(f)->at_boundary() &&
-                            !is_junction_face(cell->id(), f) ?
-                          "  INTERIOR" :
-                          "")
-                    << "\n";
-                  goto done;
-                }
-            }
+          {
+            if (!cell->is_locally_owned())
+              continue;
+            for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+              {
+                const auto key = canonical_face_key(cell, f);
+                const auto it  = face_dof_map.find(key);
+                if (it == face_dof_map.end())
+                  continue;
+                if (it->second.a_hat_dof == worst_i ||
+                    it->second.u_hat_dof == worst_i)
+                  {
+                    const bool is_a = (it->second.a_hat_dof == worst_i);
+                    std::cout
+                      << "row " << worst_i << " is "
+                      << (is_a ? "A_hat" : "U_hat") << " of face (cell "
+                      << cell->id() << ", f=" << f
+                      << ")  vid=" << cell->material_id()
+                      << (cell->face(f)->at_boundary() ? "  BOUNDARY" : "")
+                      << (is_junction_face(cell->id(), f) ? "  JUNCTION" : "")
+                      << (!cell->face(f)->at_boundary() &&
+                              !is_junction_face(cell->id(), f) ?
+                            "  INTERIOR" :
+                            "")
+                      << "\n";
+                    goto done;
+                  }
+              }
+          }
       done:;
         std::cout << "\n=====================================\n";
         std::cout << "Central FD Jacobian check\n";
@@ -3331,8 +3622,9 @@ BloodFlowSystem<dim, spacedim>::run()
         IndexSet is(n_total_dofs);
         is.add_range(0, n_cell_dofs); // cell DOFs carry d/dt
         if (n_rcr_dofs > 0)
-          is.add_range(n_trace_end, n_total_dofs); // capacitor DOFs do too
-        return is;                                 // trace DOFs are algebraic
+          is.add_range(n_trace_end,
+                       n_total_dofs); // capacitor DOFs do too
+        return is;                    // trace DOFs are algebraic
       };
 
       // Residual F(t, y, ydot) = 0
