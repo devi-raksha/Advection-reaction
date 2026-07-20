@@ -225,10 +225,6 @@ public:
   void
   initialize_terminal_capacitors();
 
-  void
-  update_terminal_pressures(const double      dt,
-                            const VectorType &evaluation_point);
-
   // Residual F(t,y) for IDA; assembles the cell, trace, junction, continuity
   // and capacitor rows.
   void
@@ -257,7 +253,6 @@ public:
   void
   output_results(const VectorType  &y,
                  const VectorType  &pressure_vec,
-                 const VectorType  &theoretical_peak,
                  const unsigned int cycle) const;
 
   void
@@ -310,9 +305,10 @@ private:
   // -----------------------------------------------------------------------
   std::map<FaceKey, FaceTraceDof> face_dof_map;
 
-  VertexKey
-  face_key(const typename DoFHandler<dim, spacedim>::active_cell_iterator &cell,
-           const unsigned int face_no) const;
+  // VertexKey
+  // face_key(const typename DoFHandler<dim, spacedim>::active_cell_iterator
+  // &cell,
+  //          const unsigned int face_no) const;
 
   ParsedTools::Constants    par;
   AffineConstraints<double> constraints;

@@ -624,11 +624,11 @@ BloodFlowSystem<dim, spacedim>::build_face_dof_map()
 // ==========================================================================
 // build_rcr_dof_map
 //
-// One capacitor pressure per RCR terminal with C > 0, appended after the FE
-// range.  The terminal boundary ids come from rcr_map, which is replicated,
-// so the enumeration is identical on every rank without communication -- a
-// necessary property, since a global index must mean the same thing
-// everywhere.
+// One capacitor pressure per RCR terminal with C > 0 or we write R_2 > 0,
+// appended after the FE range.  The terminal boundary ids come from rcr_map,
+// which is replicated, so the enumeration is identical on every rank without
+// communication -- a necessary property, since a global index must mean the
+// same thing everywhere.
 //
 // A Pc index is *owned* by the rank owning the cell that carries the terminal
 // face.  Each terminal face has exactly one incident cell, so this assigns
@@ -645,7 +645,8 @@ BloodFlowSystem<dim, spacedim>::build_rcr_dof_map()
 
   const types::global_dof_index first_pc = dof_handler.n_dofs();
 
-  // Reflection mode forces all outlets to reflection, so no Pc DoFs at all.
+  // Numbering: identical on every rank, no communication needed -- rcr_map
+  // is replicated, so every rank enumerates it the same way.
   if (outlet_type != "Reflection")
     for (const auto &[bid, rcr] : rcr_map)
       {
@@ -660,27 +661,34 @@ BloodFlowSystem<dim, spacedim>::build_rcr_dof_map()
 
   n_total_dofs = first_pc + n_rcr_dofs;
 
-  // Ownership: whoever owns the cell holding the terminal face.
+  // Ownership: dof_handler's own FE numbering is already split into
+  // contiguous, rank-ordered blocks with no gaps between them (that's
+  // intrinsic to how a parallel DoFHandler numbers its own dofs -- rank r's
+  // block ends exactly where rank r+1's begins).  The Pc range sits right
+  // after all of that, starting at first_pc.  For a rank's combined FE+Pc
+  // range to be one contiguous interval (which is what PETSc requires),
+  // every Pc must go to the *one* rank whose FE block ends at first_pc -- no
+  // other rank's FE block is adjacent to the Pc range, so splitting the Pc's
+  // up by terminal ownership (or by any other rule) always leaves a gap for
+  // every rank except that one.  Assembly is unaffected: it still happens on
+  // whichever rank owns each terminal's cell, and off-owner contributions
+  // are already routed correctly by the compress(VectorOperation::add)
+  // calls used throughout this file.
+  unsigned int local_candidate = n_mpi_processes; // sentinel: "not me"
+  if (first_pc > 0 && dof_handler.locally_owned_dofs().is_element(first_pc - 1))
+    local_candidate = this_mpi_process;
+
+  const unsigned int pc_owner =
+    Utilities::MPI::min(local_candidate, mpi_communicator);
+
+  Assert(pc_owner < n_mpi_processes,
+         ExcMessage("Could not find the rank owning the last FE DoF."));
+
   rcr_dofs_owned.clear();
   rcr_dofs_owned.set_size(n_total_dofs);
-
-  for (const auto &cell : dof_handler.active_cell_iterators())
-    {
-      if (!cell->is_locally_owned())
-        continue;
-
-      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-        {
-          if (!cell->face(f)->at_boundary())
-            continue;
-          if (is_junction_face(cell->id(), f))
-            continue;
-
-          const auto it = rcr_pc_dof.find(cell->face(f)->boundary_id());
-          if (it != rcr_pc_dof.end())
-            rcr_dofs_owned.add_index(it->second);
-        }
-    }
+  if (this_mpi_process == pc_owner)
+    for (types::global_dof_index i = first_pc; i < n_total_dofs; ++i)
+      rcr_dofs_owned.add_index(i);
   rcr_dofs_owned.compress();
 
   Assert(Utilities::MPI::sum<types::global_dof_index>(
@@ -708,15 +716,14 @@ BloodFlowSystem<dim, spacedim>::update_ghosted_vectors(
 
 
   y_relevant = y;
-
-
-  std::cout << "Rank " << this_mpi_process << '\n'
-            << "  y size        = " << y.size() << '\n'
-            << "  owned dofs    = " << locally_owned_dofs.n_elements() << '\n'
-            << "  owned FE dofs = " << locally_owned_fe_dofs.n_elements()
-            << '\n'
-            << "  range = [" << y.local_range().first << ", "
-            << y.local_range().second << ")\n";
+  // std::cout << "Rank " << this_mpi_process << '\n'
+  //           << "  y size        = " << y.size() << '\n'
+  //           << "  owned dofs    = " << locally_owned_dofs.n_elements() <<
+  //           '\n'
+  //           << "  owned FE dofs = " << locally_owned_fe_dofs.n_elements()
+  //           << '\n'
+  //           << "  range = [" << y.local_range().first << ", "
+  //           << y.local_range().second << ")\n";
   const auto range = y.local_range();
 
   for (const auto i : locally_owned_fe_dofs)
@@ -731,13 +738,7 @@ BloodFlowSystem<dim, spacedim>::update_ghosted_vectors(
 
       y_fe_owned(i) = y(i);
     }
-
-
-
   y_fe_owned.compress(VectorOperation::insert);
-
-
-
   y_fe_relevant = y_fe_owned;
 }
 
@@ -1121,14 +1122,13 @@ BloodFlowSystem<dim, spacedim>::setup_system()
 
   // ---- vectors ------------------------------------------------------------
   solution.reinit(locally_owned_dofs, mpi_communicator);
-  const auto range = solution.local_range();
+  // const auto range = solution.local_range();
 
   std::cout << "Rank " << this_mpi_process << "\nsolution.local_range = ["
             << solution.local_range().first << ","
             << solution.local_range().second << ")\n";
   solution_dot.reinit(locally_owned_dofs, mpi_communicator);
   pressure.reinit(locally_owned_dofs, mpi_communicator);
-  theoretical_peak.reinit(locally_owned_dofs, mpi_communicator);
   residual_F.reinit(locally_owned_dofs, mpi_communicator);
 
   y_relevant.reinit(locally_owned_dofs,
@@ -1261,7 +1261,7 @@ BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(VectorType  &sol,
 {
   TimerOutput::Scope timer(computing_timer, "initialize_trace_unknowns");
 
-  const double       tol      = 1.0e-9;
+  const double       tol      = 1.0e-8;
   const unsigned int max_iter = 50;
 
   pcout << "\n=== initialize_trace_unknowns (Newton) ===\n";
@@ -1808,9 +1808,10 @@ BloodFlowSystem<dim, spacedim>::lf_flux_jac(const double       bn_L,
 
 template <int dim, int spacedim>
 void
-BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double      t,
-                                                        const VectorType &y,
-                                                        VectorType       &F)
+BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(
+  const double t,
+  const VectorType & /*y*/,
+  VectorType &F)
 {
   TimerOutput::Scope timer(computing_timer, "assemble_cell_residuals");
 
@@ -2209,6 +2210,33 @@ BloodFlowSystem<dim, spacedim>::assemble_rcr_capacitor_equations(
   if (rcr_pc_dof.empty())
     return;
 
+  // ydot is IDA's raw vector: unlike y (ghosted into y_relevant by the
+  // caller), it only holds entries this rank owns.  Pc row ownership is now
+  // assigned to a single designated rank for PETSc's sake (see
+  // build_rcr_dof_map), which in general differs from the rank that owns
+  // the terminal's cell -- the rank that needs Pc_dot here to write the
+  // residual is often not the one that owns it.  n_rcr_dofs is tiny, so a
+  // manual all-reduce of that short array is far cheaper than standing up a
+  // full ghosted copy of ydot just for this.
+  const types::global_dof_index first_pc = n_total_dofs - n_rcr_dofs;
+  std::vector<double>           pc_dot_local(n_rcr_dofs, 0.0);
+  for (const auto &[bid, pc_dof] : rcr_pc_dof)
+    if (locally_owned_dofs.is_element(pc_dof))
+      pc_dot_local[pc_dof - first_pc] = ydot(pc_dof);
+
+  // Utilities::MPI::sum's std::vector<double> overload isn't explicitly
+  // instantiated in every deal.II build (it's only compiled for a fixed set
+  // of types), so call MPI_Allreduce directly instead -- it's always
+  // available once <deal.II/base/mpi.h> is included.
+  std::vector<double> pc_dot_global(n_rcr_dofs, 0.0);
+  if (n_rcr_dofs > 0)
+    MPI_Allreduce(pc_dot_local.data(),
+                  pc_dot_global.data(),
+                  static_cast<int>(n_rcr_dofs),
+                  MPI_DOUBLE,
+                  MPI_SUM,
+                  mpi_communicator);
+
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
       if (!cell->is_locally_owned())
@@ -2231,12 +2259,13 @@ BloodFlowSystem<dim, spacedim>::assemble_rcr_capacitor_equations(
           get_face_trace(y, cell, f, A_hat, U_hat);
           const double Q      = A_hat * U_hat;
           const double Pc     = y(pc_dof);
-          const double Pc_dot = ydot(pc_dof);
+          const double Pc_dot = pc_dot_global[pc_dof - first_pc];
 
           // C*Ṗc - Q + (Pc - P_out)/R2 = 0
-          // A Pc index is owned by the rank owning the cell that carries its
-          // terminal face, which is this one.
-          Assert(locally_owned_dofs.is_element(pc_dof), ExcInternalError());
+          // Written from whichever rank owns the terminal's cell; the row
+          // itself may be owned by a *different* rank for PETSc's
+          // partitioning, and the off-owner add is routed there by the
+          // caller's compress(VectorOperation::add).
           F(pc_dof) += rcr.C * Pc_dot - Q + (Pc - rcr.P_out) / rcr.R2;
         }
     }
@@ -2579,8 +2608,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian(const double      t,
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
-  const double      t,
-  const VectorType &y)
+  const double t,
+  const VectorType & /*y*/)
 {
   TimerOutput::Scope timer(computing_timer, "assemble_jacobian_cell_block");
 
@@ -3422,42 +3451,6 @@ BloodFlowSystem<dim, spacedim>::compute_pressure(const VectorType &y,
   p.compress(VectorOperation::insert);
 }
 
-// ============================================================================
-// compute_theoretical_peak
-// ============================================================================
-template <int dim, int spacedim>
-void
-BloodFlowSystem<dim, spacedim>::compute_theoretical_peak(VectorType &tp) const
-{
-  tp = 0.0;
-
-  const double xi  = par["xi"];
-  const double mu  = par["mu"];
-  const double rho = par["rho"];
-
-  const auto  &props = vessel_map.at(0);
-  const double Ad    = props.a_d;
-  const double c0    = compute_wave_speed(Ad, 0);
-
-  std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
-
-  for (const auto &cell : dof_handler.active_cell_iterators())
-    {
-      if (!cell->is_locally_owned())
-        continue;
-
-      cell->get_dof_indices(ldofs);
-
-      const double x = cell->center()[0];
-      const double val =
-        std::exp(-(xi + 2.0) * numbers::PI * mu * x / (c0 * Ad * rho));
-
-      for (unsigned int i = 0; i < fe->n_dofs_per_cell(); ++i)
-        tp(ldofs[i]) = val;
-    }
-
-  tp.compress(VectorOperation::insert);
-}
 
 // ============================================================================
 // output_results
@@ -3472,7 +3465,6 @@ template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::output_results(const VectorType  &y,
                                                const VectorType  &pressure_vec,
-                                               const VectorType  &tp,
                                                const unsigned int cycle) const
 {
   TimerOutput::Scope timer(computing_timer, "output_results");
@@ -3496,7 +3488,6 @@ BloodFlowSystem<dim, spacedim>::output_results(const VectorType  &y,
 
   const VectorType sol_fe = to_fe_ghosted(y);
   const VectorType p_fe   = to_fe_ghosted(pressure_vec);
-  const VectorType tp_fe  = to_fe_ghosted(tp);
 
   DataOut<dim, spacedim> data_out;
   data_out.attach_dof_handler(dof_handler);
@@ -3512,12 +3503,6 @@ BloodFlowSystem<dim, spacedim>::output_results(const VectorType  &y,
 
   names = {"pressure", "unused", "unused_p2", "unused_p3"};
   data_out.add_data_vector(p_fe,
-                           names,
-                           DataOut<dim, spacedim>::type_dof_data,
-                           interp);
-
-  names = {"theoretical_peak", "unused1", "unused_t2", "unused_t3"};
-  data_out.add_data_vector(tp_fe,
                            names,
                            DataOut<dim, spacedim>::type_dof_data,
                            interp);
@@ -3664,7 +3649,6 @@ BloodFlowSystem<dim, spacedim>::run()
       setup_system();
       open_csv_files();
       initialize_terminal_capacitors();
-      compute_theoretical_peak(theoretical_peak);
       build_per_cell_mass_inv();
       compute_initial_solution(solution, ida_parameters.initial_time);
       initialize_trace_unknowns(solution, ida_parameters.initial_time);
@@ -3836,8 +3820,7 @@ BloodFlowSystem<dim, spacedim>::run()
                                const unsigned int step_number) {
         time = t;
         compute_pressure(sol, pressure);
-        compute_theoretical_peak(theoretical_peak);
-        output_results(sol, pressure, theoretical_peak, step_number);
+        output_results(sol, pressure, step_number);
         write_csv_row(t, sol);
       };
 
