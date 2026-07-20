@@ -597,7 +597,7 @@ private:
   std::string  outlet_type;
   double       theta    = 0.5;
   double       theta_bd = 0.5;
-  double      gamma     = 0.9;  // 0.5*gamma*(U^2) term in total pressure continuity at junctions
+  double      gamma     = 1;  // 0.5*gamma*(U^2) term in total pressure continuity at junctions chnage only for 56 arteries <= 0.8
   double       time     = 0.0;
 
   NumericalFluxType numerical_flux_type     = NumericalFluxType::HLL;
