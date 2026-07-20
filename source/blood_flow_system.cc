@@ -98,6 +98,7 @@ BloodFlowSystem<dim, spacedim>::BloodFlowSystem(const MPI_Comm comm)
   add_parameter("Number of global refinement", n_global_refinements);
   add_parameter("Theta (penalty parameter)", theta);
   add_parameter("Theta Boundary (stability parameter)", theta_bd);
+  add_parameter("Gamma (Total pressure factor)", gamma);
   add_parameter("Verbosity (console depth)", verbosity);
   add_parameter("Output directory", output_directory);
   add_parameter("Numerical flux type", numerical_flux_type_str);
@@ -2395,7 +2396,7 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
         const double a_d0 =
           compute_a_d_at_face(J.half_faces[0].cell, J.half_faces[0].face_no);
         const double H0 =
-          0.5 * theta * U_hat[0] * U_hat[0] +
+          0.5 * gamma * U_hat[0] * U_hat[0] +
           compute_pressure_value(A_hat[0],
                                  J.half_faces[0].cell->material_id(),
                                  a_d0) /
@@ -2406,7 +2407,7 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
             const double a_di = compute_a_d_at_face(J.half_faces[i].cell,
                                                     J.half_faces[i].face_no);
             const double Hi =
-              0.5 * theta * U_hat[i] * U_hat[i] +
+              0.5 * gamma * U_hat[i] * U_hat[i] +
               compute_pressure_value(A_hat[i],
                                      J.half_faces[i].cell->material_id(),
                                      a_di) /
@@ -3377,11 +3378,11 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
           // \partialH_0/\partialA_hat_0 ,
           // \partialH_0/\partialU_hat_0
           jacobian_matrix.add(u_row[i - 1], a_row[0], dP_hat[0] / rho);
-          jacobian_matrix.add(u_row[i - 1], u_row[0], theta * U_hat[0]);
+          jacobian_matrix.add(u_row[i - 1], u_row[0], gamma * U_hat[0]);
           //  \partial(-H_i)/\partialA_hat_i,
           //  \partial(-H_i)/\partialU_hat_i
           jacobian_matrix.add(u_row[i - 1], a_row[i], -dP_hat[i] / rho);
-          jacobian_matrix.add(u_row[i - 1], u_row[i], -theta * U_hat[i]);
+          jacobian_matrix.add(u_row[i - 1], u_row[i], -gamma * U_hat[i]);
         }
 
       // Compat row for vessel 0 -> u_row[K-1]
