@@ -11,31 +11,9 @@ This project solves a 1D blood–flow model embedded in 3D using discontinuous G
 
 ### Governing equations (conservation form)
 
-Mass (area):
-$$
-\partial_t A + \nabla\cdot\bigl(b\,A\,U\bigr) = 0
-$$
+The mathematical formulation (conservation laws, tube law, and wave-speed)
+is documented in the site page **Mathematics**: see `doc/math.md`.
 
-Momentum:
-$$
-\partial_t U + \nabla\cdot \biggl(b\Bigl(\frac{U^2}{2} + \frac{P(A)}{\rho}\Bigr)\biggr) + \eta_c\,U = 0
-$$
-
-### Tube law and wave speed
-
-Pressure–area (tube) law:
-$$
-P(A) = p_0 + \mu\Bigl[\Bigl(\frac{A}{A_0}\Bigr)^m - 1\Bigr],
-\qquad
-\frac{dP}{dA} = \mu\,m\,\frac{A^{\,m-1}}{A_0^{\,m}} = \mu\,m\,\frac{1}{A_0}\Bigl(\frac{A}{A_0}\Bigr)^{m-1}.
-$$
-Wave speed:
-$$
-c = \sqrt{\frac{A}{\rho}\frac{dP}{dA}}
-= \sqrt{\frac{\mu\,m}{\rho}\Bigl(\frac{A}{A_0}\Bigr)^{m}}.
-$$
-
-(Here $\rho$ is fluid density, $\eta_c$ a friction coefficient, $b$ a geometric weighting, and $p_0,A_0,\mu,m$ tube-law constants.)
 
 ## Numerical Method
 
