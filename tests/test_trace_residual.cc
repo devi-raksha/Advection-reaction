@@ -17,8 +17,19 @@
 // F_trace(y_cell^0, y_hat) must be zero to machine precision.
 // This verifies that the Newton solve converged correctly and that
 // the initial condition is consistent before IDA even starts.
+//
+// Parallel: problem.triangulation is a parallel::fullydistributed
+// triangulation, so mesh loading goes through problem.create_triangulation()
+// rather than attaching GridIn by hand. assemble_trace_*_equations() read
+// from the ghosted y_relevant member (populated via update_ghosted_vectors),
+// not directly from solution -- interior/junction equations touch DOFs on
+// neighboring cells that may be owned by another rank. F_before/F_after are
+// non-ghosted VectorType, matching every other write-only vector in the
+// class, and the residual norm is accumulated over trace_dofs_owned (the
+// locally owned trace rows) then reduced across ranks.
+// ---------------------------------------------------------------------
 
-#include <deal.II/grid/grid_in.h>
+#include <deal.II/base/mpi.h>
 
 #include <deal.II/lac/vector.h>
 
@@ -33,70 +44,11 @@ test()
 {
   BloodFlowSystem<1, 3> problem;
   problem.initialize_params(PRM_DIR "multi_vessel.prm");
+  deallog.depth_console(10);
+  deallog.depth_file(10);
 
-  // --- Load mesh and physics ---
-  dealii::GridIn<1, 3> grid_in;
-  grid_in.attach_triangulation(problem.triangulation);
-  std::ifstream mesh_file(problem.vtk_file_path);
-  grid_in.read_vtk(mesh_file);
+  problem.create_triangulation();
 
-  VTKUtils::read_cell_data(problem.vtk_file_path,
-                           "vessel_id",
-                           problem.cell_vessel_ids);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "a0", problem.cell_a0);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "a_d", problem.cell_a_d);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "E", problem.cell_E);
-  VTKUtils::read_cell_data(problem.vtk_file_path,
-                           "h_wall",
-                           problem.cell_h_wall);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "p_d", problem.cell_p_d);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "p0", problem.cell_p0);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "L", problem.cell_L);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "r_d", problem.cell_r_d);
-
-  VTKUtils::read_vertex_data(problem.vtk_file_path,
-                             "boundary_id",
-                             problem.point_boundary_id);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "R1", problem.point_R1);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "R2", problem.point_R2);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "C", problem.point_C);
-  VTKUtils::read_vertex_data(problem.vtk_file_path,
-                             "P_out",
-                             problem.point_P_out);
-
-  {
-    unsigned int cell_idx = 0;
-    for (auto &cell : problem.triangulation.active_cell_iterators())
-      {
-        cell->set_material_id(
-          static_cast<unsigned int>(problem.cell_vessel_ids[cell_idx]));
-        for (unsigned int f = 0; f < GeometryInfo<1>::faces_per_cell; ++f)
-          if (cell->face(f)->at_boundary())
-            {
-              const unsigned int v = cell->face(f)->vertex_index(0);
-              cell->face(f)->set_boundary_id(
-                static_cast<types::boundary_id>(problem.point_boundary_id[v]));
-            }
-        ++cell_idx;
-      }
-  }
-
-  for (const auto &cell : problem.triangulation.active_cell_iterators())
-    for (unsigned int f = 0; f < GeometryInfo<1>::faces_per_cell; ++f)
-      if (cell->face(f)->at_boundary())
-        {
-          const types::boundary_id          bid = cell->face(f)->boundary_id();
-          const unsigned int                v = cell->face(f)->vertex_index(0);
-          BloodFlowSystem<1, 3>::RCRPhysics rcr;
-          rcr.R1    = problem.point_R1[v];
-          rcr.R2    = problem.point_R2[v];
-          rcr.C     = problem.point_C[v];
-          rcr.P_out = problem.point_P_out[v];
-          if (rcr.R1 > 0.0)
-            problem.rcr_map[bid] = rcr;
-        }
-
-  problem.triangulation.refine_global(problem.n_global_refinements);
   problem.setup_system();
   problem.initialize_terminal_capacitors();
   problem.build_per_cell_mass_inv();
@@ -106,22 +58,27 @@ test()
 
   // Step 2: check trace residual BEFORE initialize_trace_unknowns
   {
-    Vector<double> F_before(problem.solution.size());
-    problem.assemble_trace_interior_equations(problem.solution, F_before);
+    problem.update_ghosted_vectors(problem.solution);
+
+    VectorType F_before(problem.locally_owned_dofs, problem.mpi_communicator);
+    F_before = 0.0;
+    problem.assemble_trace_interior_equations(problem.y_relevant, F_before);
     problem.assemble_trace_boundary_equations(problem.time,
-                                              problem.solution,
+                                              problem.y_relevant,
                                               F_before);
-    problem.assemble_trace_junction_equations(problem.solution, F_before);
+    problem.assemble_trace_junction_equations(problem.y_relevant, F_before);
+    F_before.compress(VectorOperation::add);
 
-    double norm_before = 0.0;
-    for (types::global_dof_index i = problem.n_cell_dofs;
-         i < problem.n_total_dofs;
-         ++i)
-      norm_before += F_before[i] * F_before[i];
-    norm_before = std::sqrt(norm_before);
+    double norm_before_local = 0.0;
+    for (const auto i : problem.trace_dofs_owned)
+      norm_before_local += F_before(i) * F_before(i);
 
-    deallog << "Trace residual BEFORE initialize_trace_unknowns: "
-            << norm_before << std::endl;
+    const double norm_before = std::sqrt(
+      Utilities::MPI::sum(norm_before_local, problem.mpi_communicator));
+
+    if (Utilities::MPI::this_mpi_process(problem.mpi_communicator) == 0)
+      deallog << "Trace residual BEFORE initialize_trace_unknowns: "
+              << norm_before << std::endl;
   }
 
   // Step 3: run Newton to find consistent trace unknowns
@@ -129,34 +86,43 @@ test()
 
   // Step 4: check trace residual AFTER initialize_trace_unknowns
   {
-    Vector<double> F_after(problem.solution.size());
-    problem.assemble_trace_interior_equations(problem.solution, F_after);
+    problem.update_ghosted_vectors(problem.solution);
+
+    VectorType F_after(problem.locally_owned_dofs, problem.mpi_communicator);
+    F_after = 0.0;
+    problem.assemble_trace_interior_equations(problem.y_relevant, F_after);
     problem.assemble_trace_boundary_equations(problem.time,
-                                              problem.solution,
+                                              problem.y_relevant,
                                               F_after);
-    problem.assemble_trace_junction_equations(problem.solution, F_after);
+    problem.assemble_trace_junction_equations(problem.y_relevant, F_after);
+    F_after.compress(VectorOperation::add);
 
-    double norm_after = 0.0;
-    for (types::global_dof_index i = problem.n_cell_dofs;
-         i < problem.n_total_dofs;
-         ++i)
-      norm_after += F_after[i] * F_after[i];
-    norm_after = std::sqrt(norm_after);
+    double norm_after_local = 0.0;
+    for (const auto i : problem.trace_dofs_owned)
+      norm_after_local += F_after(i) * F_after(i);
 
-    deallog << "Trace residual AFTER initialize_trace_unknowns:  " << norm_after
-            << std::endl;
+    const double norm_after = std::sqrt(
+      Utilities::MPI::sum(norm_after_local, problem.mpi_communicator));
+
+    if (Utilities::MPI::this_mpi_process(problem.mpi_communicator) == 0)
+      deallog << "Trace residual AFTER initialize_trace_unknowns:  "
+              << norm_after << std::endl;
 
     AssertThrow(norm_after < 1e-10,
                 ExcMessage("initialize_trace_unknowns did not converge: "
                            "trace residual is not zero."));
   }
 
-  deallog << "initialize_trace_unknowns PASSED." << std::endl;
+  if (Utilities::MPI::this_mpi_process(problem.mpi_communicator) == 0)
+    deallog << "initialize_trace_unknowns PASSED." << std::endl;
 }
 
 int
-main()
+main(int argc, char **argv)
 {
+  Utilities::MPI::MPI_InitFinalize mpi_initialization(
+    argc, argv, numbers::invalid_unsigned_int);
+
   initlog();
   test();
 }

@@ -1,3 +1,2 @@
 
-DEAL::n_cell=64  n_total=129
-DEAL::L2_error=9.8588e-06  worst_row=101  row_L2_error=2.5536e-06
+DEAL::L2_error = 9.858784e-06

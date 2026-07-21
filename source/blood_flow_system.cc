@@ -172,13 +172,15 @@ BloodFlowSystem<dim, spacedim>::create_triangulation()
   {
     GridIn<dim, spacedim> grid_in;
     grid_in.attach_triangulation(serial_triangulation);
-    pcout << "Reading VTK file: " << vtk_file_path << std::endl;
+    if (verbosity > 0)
+      pcout << "Reading VTK file: " << vtk_file_path << std::endl;
     std::ifstream mesh_file(vtk_file_path);
     AssertThrow(mesh_file, ExcMessage("Cannot open " + vtk_file_path));
     grid_in.read_vtk(mesh_file);
   }
-  pcout << "Coarse cells = " << serial_triangulation.n_active_cells()
-        << std::endl;
+  if (verbosity > 0)
+    pcout << "Coarse cells = " << serial_triangulation.n_active_cells()
+          << std::endl;
 
   VTKUtils::read_cell_data(vtk_file_path, "vessel_id", cell_vessel_ids);
   VTKUtils::read_cell_data(vtk_file_path, "a0", cell_a0);
@@ -268,9 +270,9 @@ BloodFlowSystem<dim, spacedim>::create_triangulation()
       serial_triangulation, mpi_communicator);
 
   triangulation.create_triangulation(description);
-
-  pcout << "Global active cells = " << triangulation.n_global_active_cells()
-        << std::endl;
+  if (verbosity > 0)
+    pcout << "Global active cells = " << triangulation.n_global_active_cells()
+          << std::endl;
   if (verbosity > 0)
     {
       const std::vector<unsigned int> owned =
@@ -503,10 +505,11 @@ BloodFlowSystem<dim, spacedim>::detect_junctions()
 
   const unsigned int n_global_junctions =
     Utilities::MPI::sum(n_local_junctions, mpi_communicator);
-  pcout << "Detected " << n_global_junctions
-        << " junction half-face groups (counting each junction once per rank "
-           "that touches it)."
-        << std::endl;
+  if (verbosity > 0)
+    pcout << "Detected " << n_global_junctions
+          << " junction half-face groups (counting each junction once per rank "
+             "that touches it)."
+          << std::endl;
 }
 
 // ============================================================================
@@ -618,8 +621,9 @@ BloodFlowSystem<dim, spacedim>::build_face_dof_map()
   const types::global_dof_index n_pairs =
     Utilities::MPI::sum<types::global_dof_index>(trace_continuity_pairs.size(),
                                                  mpi_communicator);
-  pcout << "Face DOF map: FE dofs = " << dof_handler.n_dofs()
-        << "  continuity pairs = " << n_pairs << std::endl;
+  if (verbosity > 0)
+    pcout << "Face DOF map: FE dofs = " << dof_handler.n_dofs()
+          << "  continuity pairs = " << n_pairs << std::endl;
 }
 
 // ==========================================================================
@@ -695,9 +699,9 @@ BloodFlowSystem<dim, spacedim>::build_rcr_dof_map()
   Assert(Utilities::MPI::sum<types::global_dof_index>(
            rcr_dofs_owned.n_elements(), mpi_communicator) == n_rcr_dofs,
          ExcMessage("Every capacitor DOF must be owned by exactly one rank."));
-
-  pcout << "RCR capacitor DOFs: n_rcr = " << n_rcr_dofs
-        << "  n_total = " << n_total_dofs << std::endl;
+  if (verbosity > 0)
+    pcout << "RCR capacitor DOFs: n_rcr = " << n_rcr_dofs
+          << "  n_total = " << n_total_dofs << std::endl;
 }
 
 // ============================================================================
@@ -1046,24 +1050,6 @@ BloodFlowSystem<dim, spacedim>::setup_system()
   locally_owned_dofs.add_indices(locally_owned_fe_dofs);
   locally_owned_dofs.add_indices(rcr_dofs_owned);
   locally_owned_dofs.compress();
-  std::cout << "Rank " << this_mpi_process
-            << "\nlocally_owned_dofs contains 6160 = "
-            << locally_owned_dofs.is_element(6160) << std::endl;
-
-  std::cout << "First 10 owned indices:\n";
-  std::cout << "Rank " << this_mpi_process
-            << " locally_owned_dofs contiguous = "
-            << locally_owned_dofs.is_contiguous() << std::endl;
-
-  unsigned int count = 0;
-  for (const auto i : locally_owned_dofs)
-    {
-      std::cout << i << " ";
-      if (++count == 10)
-        break;
-    }
-  std::cout << std::endl;
-
   locally_relevant_dofs.clear();
   locally_relevant_dofs.set_size(n_total_dofs);
   locally_relevant_dofs.add_indices(locally_relevant_fe_dofs);
@@ -1123,11 +1109,6 @@ BloodFlowSystem<dim, spacedim>::setup_system()
 
   // ---- vectors ------------------------------------------------------------
   solution.reinit(locally_owned_dofs, mpi_communicator);
-  // const auto range = solution.local_range();
-
-  std::cout << "Rank " << this_mpi_process << "\nsolution.local_range = ["
-            << solution.local_range().first << ","
-            << solution.local_range().second << ")\n";
   solution_dot.reinit(locally_owned_dofs, mpi_communicator);
   pressure.reinit(locally_owned_dofs, mpi_communicator);
   residual_F.reinit(locally_owned_dofs, mpi_communicator);
@@ -1140,14 +1121,14 @@ BloodFlowSystem<dim, spacedim>::setup_system()
                        locally_relevant_fe_dofs,
                        mpi_communicator);
   AssertThrow(y_fe_relevant.size() == dof_handler.n_dofs(), ExcInternalError());
-
-  pcout << "  cell DoFs (differential): "
-        << Utilities::MPI::sum<types::global_dof_index>(
-             cell_dofs_owned.n_elements(), mpi_communicator)
-        << "\n  trace DoFs (algebraic)  : "
-        << Utilities::MPI::sum<types::global_dof_index>(
-             trace_dofs_owned.n_elements(), mpi_communicator)
-        << "\n  total DoFs              : " << n_total_dofs << std::endl;
+  if (verbosity > 0)
+    pcout << "  cell DoFs (differential): "
+          << Utilities::MPI::sum<types::global_dof_index>(
+               cell_dofs_owned.n_elements(), mpi_communicator)
+          << "\n  trace DoFs (algebraic)  : "
+          << Utilities::MPI::sum<types::global_dof_index>(
+               trace_dofs_owned.n_elements(), mpi_communicator)
+          << "\n  total DoFs              : " << n_total_dofs << std::endl;
 }
 
 // ============================================================================
@@ -1264,8 +1245,8 @@ BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(VectorType  &sol,
 
   const double       tol      = 1.0e-8;
   const unsigned int max_iter = 50;
-
-  pcout << "\n=== initialize_trace_unknowns (Newton) ===\n";
+  if (verbosity > 0)
+    pcout << "\n=== initialize_trace_unknowns (Newton) ===\n";
 
   VectorType G(locally_owned_dofs, mpi_communicator);
   VectorType rhs(locally_owned_dofs, mpi_communicator);
@@ -1290,14 +1271,15 @@ BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(VectorType  &sol,
 
       const double gnorm_inf =
         Utilities::MPI::max(gnorm_inf_local, mpi_communicator);
-
-      pcout << "  iter " << std::setw(3) << iter
-            << "  ||G||_inf = " << std::scientific << std::setprecision(4)
-            << gnorm_inf << "\n";
+      if (verbosity > 0)
+        pcout << "  iter " << std::setw(3) << iter
+              << "  ||G||_inf = " << std::scientific << std::setprecision(4)
+              << gnorm_inf << "\n";
 
       if (gnorm_inf < tol)
         {
-          pcout << "  Converged in " << iter << " Newton iteration(s).\n";
+          if (verbosity > 0)
+            pcout << "  Converged in " << iter << " Newton iteration(s).\n";
           break;
         }
 
@@ -2488,8 +2470,11 @@ BloodFlowSystem<dim, spacedim>::assemble_residual(const double      t,
                                                   VectorType       &residual)
 {
   TimerOutput::Scope timer(computing_timer, "assemble_residual");
-  deallog.push("assemble_residual");
-  deallog << "t=" << t << std::endl;
+  if (verbosity > 1)
+    {
+      deallog.push("assemble_residual");
+      deallog << "t=" << t << std::endl;
+    }
 
   update_ghosted_vectors(y);
 
@@ -2538,7 +2523,8 @@ BloodFlowSystem<dim, spacedim>::assemble_residual(const double      t,
   assemble_rcr_capacitor_equations(y_relevant, ydot, residual);
 
   residual.compress(VectorOperation::add);
-  deallog.pop();
+  if (verbosity > 1)
+    deallog.pop();
 }
 
 // ============================================================================
@@ -2558,7 +2544,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian(const double      t,
                                                   const double alpha)
 {
   TimerOutput::Scope timer(computing_timer, "assemble_jacobian");
-  deallog.push("assemble_jacobian");
+  if (verbosity > 1)
+    deallog.push("assemble_jacobian");
   deallog << "t=" << t << std::endl;
 
   update_ghosted_vectors(y);
@@ -2603,7 +2590,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian(const double      t,
       jacobian_matrix.add(pc_dof, pc_dof, alpha * rcr_map.at(bid).C);
 
   jacobian_matrix.compress(VectorOperation::add);
-  deallog.pop();
+  if (verbosity > 1)
+    deallog.pop();
 }
 
 template <int dim, int spacedim>
@@ -3633,7 +3621,8 @@ BloodFlowSystem<dim, spacedim>::run()
 
   for (unsigned int cycle = 0; cycle < n_refinement_cycles; ++cycle)
     {
-      pcout << "\n--- Refinement cycle " << cycle << " ---\n";
+      if (verbosity > 0)
+        pcout << "\n--- Refinement cycle " << cycle << " ---\n";
 
       if (cycle == 0)
         create_triangulation();
