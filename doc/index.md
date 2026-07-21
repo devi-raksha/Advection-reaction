@@ -7,7 +7,6 @@
 overview
 background
 getting-started
-build-and-run
 testing
 documentation
 repository-layout
