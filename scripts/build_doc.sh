@@ -78,18 +78,17 @@ sed \
   "${DOXYFILE}" > "${tmp_doxyfile}"
 
 (
-  if [ -f "${DOXYFILE}" ] && [ "${RUN_DOXYGEN:-0}" = "1" ] && command -v doxygen >/dev/null 2>&1; then
-    cd "${ROOT_DIR}"
-    doxygen "${tmp_doxyfile}"
+  if [ -f "${DOXYFILE}" ] && [ "${RUN_DOXYGEN:-0}" = "1" ]; then
+    if command -v doxygen >/dev/null 2>&1; then
+      (cd "${ROOT_DIR}" && doxygen "${tmp_doxyfile}")
+    else
+      echo "doxygen not found in PATH but RUN_DOXYGEN=1. Please install doxygen to generate API docs." >&2
+      exit 127
+    fi
   else
     echo "Skipping doxygen generation (set RUN_DOXYGEN=1 to enable)"
   fi
-)
 
-(
-  cd "${ROOT_DIR}"
-  doxygen "${tmp_doxyfile}"
-)
 
 sphinx_cmd=(sphinx-build -b html "${DOCS_SOURCE_DIR}" "${SITE_DIR}")
 # If STRICT_DOCS=1 then treat warnings as errors (for CI); otherwise allow warnings.
