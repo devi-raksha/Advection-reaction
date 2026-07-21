@@ -14,7 +14,6 @@ This project solves a 1D blood–flow model embedded in 3D using discontinuous G
 The mathematical formulation (conservation laws, tube law, and wave-speed)
 is documented in the site page **Mathematics**: see `doc/math.md`.
 
-
 ## Numerical Method
 
 - **Spatial discretization:** DG on the 1D mesh embedded in 3D, with Lax–Friedrichs/HLL numerical fluxes and characteristic boundary conditions.

@@ -11,10 +11,6 @@ else
   VENV_DIR="${ROOT_DIR}/env"
 fi
 REQUIREMENTS_FILE="${ROOT_DIR}/doc/requirements.txt"
-# fallback to project root requirements-docs.txt when present
-if [ ! -f "${REQUIREMENTS_FILE}" ] && [ -f "${ROOT_DIR}/requirements-docs.txt" ]; then
-  REQUIREMENTS_FILE="${ROOT_DIR}/requirements-docs.txt"
-fi
 BUILD_DIR="${ROOT_DIR}/build/docs"
 DOXYGEN_OUT="${BUILD_DIR}/doxygen"
 SITE_DIR="${BUILD_DIR}/site"

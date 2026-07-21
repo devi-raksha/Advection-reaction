@@ -1,7 +1,5 @@
-sphinx>=7,<9
-furo>=2024.8.6
-breathe>=4.35
-exhale>=0.3.7
-myst-parser>=3,<5
-sphinxcontrib-mermaid>=0.9
-sphinxcontrib-bibtex>=2.6
+mkdocs-material==9.7.7
+mkdocs-macros-plugin==1.5.0
+pymdown-extensions>=10.2
+mkdocs-mermaid2-plugin==1.2.3
+# use the external `uv` static server (not installed via pip)

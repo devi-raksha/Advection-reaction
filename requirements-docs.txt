@@ -1,5 +1,0 @@
-mkdocs-material==9.7.7
-mkdocs-macros-plugin==1.5.0
-pymdown-extensions>=10.2
-mkdocs-mermaid2-plugin==1.2.3
-# use the external `uv` static server (not installed via pip)
