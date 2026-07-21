@@ -4,7 +4,12 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
-VENV_DIR="${ROOT_DIR}/env"
+# Prefer a repository-provided venv (e.g. `.venv`) if present (CI may create this).
+if [ -d "${ROOT_DIR}/.venv" ]; then
+  VENV_DIR="${ROOT_DIR}/.venv"
+else
+  VENV_DIR="${ROOT_DIR}/env"
+fi
 REQUIREMENTS_FILE="${ROOT_DIR}/doc/requirements.txt"
 # fallback to project root requirements-docs.txt when present
 if [ ! -f "${REQUIREMENTS_FILE}" ] && [ -f "${ROOT_DIR}/requirements-docs.txt" ]; then
@@ -39,7 +44,7 @@ if [ -f "${DOXYFILE}" ] && [ "${RUN_DOXYGEN:-0}" = "1" ]; then
 fi
 
 if [ ! -d "${VENV_DIR}" ]; then
-  python3 -m pip install --user virtualenv
+  # Use the stdlib venv module to create the virtual environment.
   python3 -m venv "${VENV_DIR}"
 fi
 
