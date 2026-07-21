@@ -15,8 +15,23 @@
 // ---------------------------------------------------------------------
 
 // Test length of domain using mass matrix.
+//
+// solution = 1.0 sets every FE component to 1, not just area: per_cell_mass
+// carries mass entries for BOTH cell components (0 = area, 1 = velocity --
+// see build_per_cell_mass_inv(), which explicitly skips components >= 2
+// since the trace DOFs carry no mass term). Area and velocity share the
+// same FE_DGQ basis/degree, so each block independently integrates to the
+// domain length L. With both components set to 1, sum_K v_K^T M_K v_K
+// therefore evaluates to 2L, not L -- that's what "0.241370 + 0.241370" in
+// the output below refers to: the area contribution and the velocity
+// contribution, each equal to L, summed. This is a deliberately different
+// check from the domain-length test that isolates component 0 only (which
+// verifies the area block alone integrates to L); this one exercises both
+// mass-carrying components at once via the cheaper solution = 1.0 shortcut.
+//
 
-#include <deal.II/grid/grid_in.h>
+
+#include <deal.II/base/mpi.h>
 
 #include <deal.II/lac/vector.h>
 
@@ -31,106 +46,57 @@ test()
 {
   BloodFlowSystem<1, 3> problem;
   problem.initialize_params(PRM_DIR "constant.prm");
+  // initialize_params() resets deallog depth according to the parameter file.
+  deallog.depth_console(10);
+  deallog.depth_file(10);
 
-  // --- Load mesh and physics (same as residual test) ---
-  dealii::GridIn<1, 3> grid_in;
-  grid_in.attach_triangulation(problem.triangulation);
-  std::ifstream mesh_file(problem.vtk_file_path);
-  grid_in.read_vtk(mesh_file);
+  problem.create_triangulation();
 
-  VTKUtils::read_cell_data(problem.vtk_file_path,
-                           "vessel_id",
-                           problem.cell_vessel_ids);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "a0", problem.cell_a0);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "a_d", problem.cell_a_d);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "E", problem.cell_E);
-  VTKUtils::read_cell_data(problem.vtk_file_path,
-                           "h_wall",
-                           problem.cell_h_wall);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "p_d", problem.cell_p_d);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "p0", problem.cell_p0);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "L", problem.cell_L);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "r_d", problem.cell_r_d);
-
-  VTKUtils::read_vertex_data(problem.vtk_file_path,
-                             "boundary_id",
-                             problem.point_boundary_id);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "R1", problem.point_R1);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "R2", problem.point_R2);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "C", problem.point_C);
-  VTKUtils::read_vertex_data(problem.vtk_file_path,
-                             "P_out",
-                             problem.point_P_out);
-
-  // --- Set material and boundary IDs ---
-  {
-    unsigned int cell_idx = 0;
-    for (auto &cell : problem.triangulation.active_cell_iterators())
-      {
-        cell->set_material_id(
-          static_cast<unsigned int>(problem.cell_vessel_ids[cell_idx]));
-        for (unsigned int f = 0; f < GeometryInfo<1>::faces_per_cell; ++f)
-          if (cell->face(f)->at_boundary())
-            {
-              const unsigned int v = cell->face(f)->vertex_index(0);
-              cell->face(f)->set_boundary_id(
-                static_cast<types::boundary_id>(problem.point_boundary_id[v]));
-            }
-        ++cell_idx;
-      }
-  }
-
-  // --- Populate rcr_map ---
-  for (const auto &cell : problem.triangulation.active_cell_iterators())
-    for (unsigned int f = 0; f < GeometryInfo<1>::faces_per_cell; ++f)
-      if (cell->face(f)->at_boundary())
-        {
-          const types::boundary_id          bid = cell->face(f)->boundary_id();
-          const unsigned int                v = cell->face(f)->vertex_index(0);
-          BloodFlowSystem<1, 3>::RCRPhysics rcr;
-          rcr.R1    = problem.point_R1[v];
-          rcr.R2    = problem.point_R2[v];
-          rcr.C     = problem.point_C[v];
-          rcr.P_out = problem.point_P_out[v];
-          if (rcr.R1 > 0.0)
-            problem.rcr_map[bid] = rcr;
-        }
-
-  problem.triangulation.refine_global(problem.n_global_refinements);
   problem.setup_system();
   problem.initialize_terminal_capacitors();
 
   problem
-    .build_per_cell_mass_inv(); // fills per_cell_mass_ and per_cell_mass_inv
+    .build_per_cell_mass_inv(); // fills per_cell_mass and per_cell_mass_inv
 
   problem.solution = 1.0;
 
   // --- Compute L = sum_K v_K^T M_K v_K using per-cell mass blocks ----------
+  // Locally owned cells only -- per_cell_mass has no entries for ghost
+  // cells -- then reduced across ranks.
 
-  double             L      = 0.0;
-  const unsigned int n_dofs = problem.fe->n_dofs_per_cell();
+  double             L_local = 0.0;
+  const unsigned int n_dofs  = problem.fe->n_dofs_per_cell();
   Vector<double>     local_v(n_dofs), local_Mv(n_dofs);
 
   for (const auto &cell : problem.dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       std::vector<types::global_dof_index> ldofs(n_dofs);
       cell->get_dof_indices(ldofs);
 
       for (unsigned int i = 0; i < n_dofs; ++i)
-        local_v(i) = problem.solution[ldofs[i]]; // = 1.0 for all cell DOFs
+        local_v(i) = problem.solution(ldofs[i]); // = 1.0 for all cell DOFs
 
-      problem.per_cell_mass_.at(cell->id()).vmult(local_Mv, local_v);
+      problem.per_cell_mass[cell->active_cell_index()].vmult(local_Mv, local_v);
 
       for (unsigned int i = 0; i < n_dofs; ++i)
-        L += local_v(i) * local_Mv(i);
+        L_local += local_v(i) * local_Mv(i);
     }
 
-  deallog << "0.241370 + 0.241370 = " << L << std::endl;
+  const double L = Utilities::MPI::sum(L_local, problem.mpi_communicator);
+
+  if (Utilities::MPI::this_mpi_process(problem.mpi_communicator) == 0)
+    deallog << "0.241370 + 0.241370 = " << L << std::endl;
 }
 
 int
-main()
+main(int argc, char **argv)
 {
+  Utilities::MPI::MPI_InitFinalize mpi_initialization(
+    argc, argv, numbers::invalid_unsigned_int);
+
   initlog();
   test();
 }

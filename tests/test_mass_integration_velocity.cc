@@ -2,11 +2,20 @@
 // Test domain length via mass matrix integration using per-cell mass blocks.
 // For a constant solution (A=1, U=1 on component 0 i.e. area DOFs only),
 // sum_K  v^T M_K v  should equal the total length of the domain.
+//
+// Parallel: each rank only holds per_cell_mass entries for the cells it
+// owns (indexed by cell->active_cell_index(), not CellId), so v is built
+// only over locally owned cells and the partial sums are reduced with
+// Utilities::MPI::sum across ranks.
 // ---------------------------------------------------------------------
 
-#include <deal.II/grid/grid_in.h>
+#include <deal.II/base/mpi.h>
 
-#include <deal.II/lac/vector.h>
+#include <deal.II/lac/petsc_vector.h>
+
+#include <cmath>
+#include <iomanip>
+#include <map>
 
 #include "blood_flow_system.h"
 #include "tests.h"
@@ -20,120 +29,91 @@ test()
   BloodFlowSystem<1, 3> problem;
   problem.initialize_params(PRM_DIR "constant.prm");
 
-  // --- Load mesh and physics (same as residual test) ---
-  dealii::GridIn<1, 3> grid_in;
-  grid_in.attach_triangulation(problem.triangulation);
-  std::ifstream mesh_file(problem.vtk_file_path);
-  grid_in.read_vtk(mesh_file);
+  // initialize_params() resets deallog depth according to the parameter file.
+  deallog.depth_console(10);
+  deallog.depth_file(10);
 
-  VTKUtils::read_cell_data(problem.vtk_file_path,
-                           "vessel_id",
-                           problem.cell_vessel_ids);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "a0", problem.cell_a0);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "a_d", problem.cell_a_d);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "E", problem.cell_E);
-  VTKUtils::read_cell_data(problem.vtk_file_path,
-                           "h_wall",
-                           problem.cell_h_wall);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "p_d", problem.cell_p_d);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "p0", problem.cell_p0);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "L", problem.cell_L);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "r_d", problem.cell_r_d);
-
-  VTKUtils::read_vertex_data(problem.vtk_file_path,
-                             "boundary_id",
-                             problem.point_boundary_id);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "R1", problem.point_R1);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "R2", problem.point_R2);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "C", problem.point_C);
-  VTKUtils::read_vertex_data(problem.vtk_file_path,
-                             "P_out",
-                             problem.point_P_out);
-
-  // --- Set material and boundary IDs ---
-  {
-    unsigned int cell_idx = 0;
-    for (auto &cell : problem.triangulation.active_cell_iterators())
-      {
-        cell->set_material_id(
-          static_cast<unsigned int>(problem.cell_vessel_ids[cell_idx]));
-        for (unsigned int f = 0; f < GeometryInfo<1>::faces_per_cell; ++f)
-          if (cell->face(f)->at_boundary())
-            {
-              const unsigned int v = cell->face(f)->vertex_index(0);
-              cell->face(f)->set_boundary_id(
-                static_cast<types::boundary_id>(problem.point_boundary_id[v]));
-            }
-        ++cell_idx;
-      }
-  }
-
-  // --- Populate rcr_map ---
-  for (const auto &cell : problem.triangulation.active_cell_iterators())
-    for (unsigned int f = 0; f < GeometryInfo<1>::faces_per_cell; ++f)
-      if (cell->face(f)->at_boundary())
-        {
-          const types::boundary_id          bid = cell->face(f)->boundary_id();
-          const unsigned int                v = cell->face(f)->vertex_index(0);
-          BloodFlowSystem<1, 3>::RCRPhysics rcr;
-          rcr.R1    = problem.point_R1[v];
-          rcr.R2    = problem.point_R2[v];
-          rcr.C     = problem.point_C[v];
-          rcr.P_out = problem.point_P_out[v];
-          if (rcr.R1 > 0.0)
-            problem.rcr_map[bid] = rcr;
-        }
-
-  problem.triangulation.refine_global(problem.n_global_refinements);
+  problem.create_triangulation();
   problem.setup_system();
+
   problem.initialize_terminal_capacitors();
-  problem
-    .build_per_cell_mass_inv(); // fills per_cell_mass_ and per_cell_mass_inv
+  problem.build_per_cell_mass_inv();
+
+  problem.compute_initial_solution(problem.solution,
+                                   problem.ida_parameters.initial_time);
+
+  problem.initialize_trace_unknowns(problem.solution,
+                                    problem.ida_parameters.initial_time);
+
+  problem.time = problem.ida_parameters.initial_time;
 
   // --- Build a unit vector on the area (component 0) cell DOFs only ---
   // With constant area = 1 and shape functions that integrate to 1 per cell,
   // sum_K v^T M_K v = integral_Omega 1 dx = total length.
-  Vector<double> v(problem.solution.size());
+  //
+  // v is a distributed, non-ghosted VectorType (matches every other
+  // write-only vector in the class, e.g. solution/residual_F): only owned
+  // cells are touched, and every DOF of a locally owned cell is itself
+  // locally owned (no cross-rank continuity constraints on the cell block),
+  // so direct local writes are safe without ghost communication.
+  VectorType v(problem.locally_owned_dofs, problem.mpi_communicator);
   v = 0.0;
 
   const unsigned int n_dofs = problem.fe->n_dofs_per_cell();
   for (const auto &cell : problem.dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       std::vector<types::global_dof_index> ldofs(n_dofs);
       cell->get_dof_indices(ldofs);
       for (unsigned int i = 0; i < n_dofs; ++i)
         {
           // Only set the area component (component 0) DOFs to 1
           if (problem.fe->system_to_component_index(i).first == 0)
-            v[ldofs[i]] = 1.0;
+            v(ldofs[i]) = 1.0;
         }
     }
+  v.compress(VectorOperation::insert);
 
-  // --- Compute L = sum_K  v_K^T M_K v_K  (cell block only) ---
-  double         L = 0.0;
+  // --- Compute L = sum_K  v_K^T M_K v_K  (cell block only, locally owned
+  //     cells only -- per_cell_mass has no entries for ghost cells), then
+  //     reduce across ranks.
+  double         L_local = 0.0;
   Vector<double> local_v(n_dofs), local_Mv(n_dofs);
   for (const auto &cell : problem.dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       std::vector<types::global_dof_index> ldofs(n_dofs);
       cell->get_dof_indices(ldofs);
 
       for (unsigned int i = 0; i < n_dofs; ++i)
-        local_v(i) = v[ldofs[i]];
+        local_v(i) = v(ldofs[i]);
 
-      problem.per_cell_mass_.at(cell->id()).vmult(local_Mv, local_v);
+      problem.per_cell_mass[cell->active_cell_index()].vmult(local_Mv, local_v);
 
       for (unsigned int i = 0; i < n_dofs; ++i)
-        L += local_v(i) * local_Mv(i);
+        L_local += local_v(i) * local_Mv(i);
     }
 
-  deallog << "n_active_cells = " << problem.triangulation.n_active_cells()
-          << std::endl;
-  deallog << "L: total domain length = " << L << std::endl;
+  const double L = Utilities::MPI::sum(L_local, problem.mpi_communicator);
+
+  if (Utilities::MPI::this_mpi_process(problem.mpi_communicator) == 0)
+    {
+      deallog << "n_active_cells = "
+              << problem.triangulation.n_global_active_cells() << std::endl;
+      deallog << "L: total domain length = " << L << std::endl;
+    }
 }
 
 int
-main()
+main(int argc, char **argv)
 {
+  Utilities::MPI::MPI_InitFinalize mpi_initialization(
+    argc, argv, numbers::invalid_unsigned_int);
+
   initlog();
   test();
 }

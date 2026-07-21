@@ -1,27 +1,44 @@
 /* --------------------------------------------------------------------------
- * Blood Flow Simulation in 1D (dim=1, spacedim=3) using DG for cell
- * unknowns and global trace unknowns (A_hat, U_hat) on every face.
+ * Blood flow simulation in 1D (dim=1, spacedim=3), run on a
+ * parallel::fullydistributed::Triangulation.
  *
- * Trace (A_hat, U_hat) now lives on `trace_dof_handler` with
- *  FESystem(FE_FaceQ(trace_degree), 2). face_trace_dofs()
- *  The global solution vector layout is:
- *   - Solution vector layout: [ cell block (DGQ) | trace block ]
+ * Unknown layout:
+ *   FESystem( FE_DGQ(fe_degree), 2,   -> comps 0,1 : cell  A, U
+ *             FE_DGQ(1),        2 )   -> comps 2,3 : trace A_hat, U_hat
+ *   followed by n_rcr_dofs capacitor pressures appended after the FE range.
+ *
+ * Ownership follows the mesh partition: the rank owning a cell owns that
+ * cell's cell-DoFs and its trace-DoFs, because every one of them is a DoF of
+ * `dof_handler`.  The only bookkeeping this file adds on top of deal.II is
+ * face_dof_map, which records *which* of the four trace DoFs at a face is the
+ * canonical one -- it does not decide who owns them.
+ *
+ * Assembly rule, obeyed by every routine below: read from the ghosted
+ * vectors, write only rows this rank owns, and close with one compress().
  * --------------------------------------------------------------------------
  */
 #include "blood_flow_system.h"
 
 #include <deal.II/base/function_parser.h>
+#include <deal.II/base/mpi.h>
 #include <deal.II/base/types.h>
 
+#include <deal.II/distributed/tria_base.h>
+
+#include <deal.II/dofs/dof_renumbering.h>
+
 #include <deal.II/grid/grid_in.h>
+#include <deal.II/grid/grid_tools.h>
 #include <deal.II/grid/tria_accessor.h>
+#include <deal.II/grid/tria_description.h>
 #include <deal.II/grid/tria_iterator.h>
 
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
-#include <deal.II/lac/sparse_direct.h>
+#include <deal.II/lac/sparsity_tools.h>
 
 #include <deal.II/meshworker/mesh_loop.h>
 
+#include <deal.II/numerics/data_out.h>
 #include <deal.II/numerics/error_estimator.h>
 #include <deal.II/numerics/vector_tools.h>
 
@@ -29,16 +46,26 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 #include "vtk_utils.h"
 
 // ==========================================================================
-// Constructors for scratch and copy data
-// =========================================================================
+// Constructor
+// ==========================================================================
 template <int dim, int spacedim>
-BloodFlowSystem<dim, spacedim>::BloodFlowSystem()
-  : par("Blood Flow Parameters",
+BloodFlowSystem<dim, spacedim>::BloodFlowSystem(const MPI_Comm comm)
+  : mpi_communicator(comm)
+  , n_mpi_processes(Utilities::MPI::n_mpi_processes(comm))
+  , this_mpi_process(Utilities::MPI::this_mpi_process(comm))
+  , pcout(std::cout, this_mpi_process == 0)
+  , computing_timer(mpi_communicator,
+                    pcout,
+                    TimerOutput::summary,
+                    TimerOutput::wall_times)
+  , direct_solver_control(1000, 1e-10)
+  , par("Blood Flow Parameters",
         {"rho", "mu", "xi", "m", "Rt"},
         {1060, 0.004, 2.0, 0.5, 0.5},
         {"Density",
@@ -46,7 +73,7 @@ BloodFlowSystem<dim, spacedim>::BloodFlowSystem()
          "Profile constant for friction term",
          "Tube law exponent",
          "Reflection coefficient at outflow boundary"})
-  , triangulation()
+  , triangulation(mpi_communicator)
   , dof_handler(triangulation)
   , fe(nullptr)
   , rhs_function("Functions",
@@ -62,10 +89,8 @@ BloodFlowSystem<dim, spacedim>::BloodFlowSystem()
                    dealii::FunctionParser<spacedim>::default_variable_names() +
                      ",t")
   , inflow_function("Functions", "0.0", "Inflow function", par, "x,t")
-  , computing_timer(std::cout, TimerOutput::summary, TimerOutput::wall_times)
 {
   add_parameter("Finite element degree", fe_degree);
-  // add_parameter("Trace finite element degree", trace_degree);
   add_parameter("Problem constants", constants);
   add_parameter("Output filename", output_filename);
   add_parameter("Use direct solver", use_direct_solver);
@@ -73,6 +98,7 @@ BloodFlowSystem<dim, spacedim>::BloodFlowSystem()
   add_parameter("Number of global refinement", n_global_refinements);
   add_parameter("Theta (penalty parameter)", theta);
   add_parameter("Theta Boundary (stability parameter)", theta_bd);
+  add_parameter("Gamma (Total pressure factor)", gamma);
   add_parameter("Verbosity (console depth)", verbosity);
   add_parameter("Output directory", output_directory);
   add_parameter("Numerical flux type", numerical_flux_type_str);
@@ -103,8 +129,10 @@ BloodFlowSystem<dim, spacedim>::initialize_params(const std::string &filename)
                                 this->prm,
                                 ParameterHandler::Short);
 
-  deallog.depth_console(verbosity);
-  deallog.depth_file(verbosity);
+  // deallog is written by rank 0 only; every other rank stays silent so that
+  // the console is readable and the log file is not written K times over.
+  deallog.depth_console(this_mpi_process == 0 ? verbosity : 0);
+  deallog.depth_file(this_mpi_process == 0 ? verbosity : 0);
 
   exact_solution.update_constants(par);
   rhs_function.update_constants(par);
@@ -123,12 +151,271 @@ BloodFlowSystem<dim, spacedim>::initialize_params(const std::string &filename)
 }
 
 // ============================================================================
+// create_triangulation
+//
+// Every rank reads the VTK file and builds the coarse mesh serially, then
+// partitions it and keeps only its own part plus a ghost layer.  For a 1-D
+// network the coarse mesh and the per-vessel data are small; what has to
+// scale is the refined mesh, and that is what the fully distributed
+// Triangulation stores.  If the coarse mesh ever stops fitting in one rank's
+// memory, this is the function to replace with
+// create_description_from_triangulation_in_groups().
+// ============================================================================
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::create_triangulation()
+{
+  TimerOutput::Scope timer(computing_timer, "create_triangulation");
+
+  Triangulation<dim, spacedim> serial_triangulation;
+
+  {
+    GridIn<dim, spacedim> grid_in;
+    grid_in.attach_triangulation(serial_triangulation);
+    if (verbosity > 0)
+      pcout << "Reading VTK file: " << vtk_file_path << std::endl;
+    std::ifstream mesh_file(vtk_file_path);
+    AssertThrow(mesh_file, ExcMessage("Cannot open " + vtk_file_path));
+    grid_in.read_vtk(mesh_file);
+  }
+  if (verbosity > 0)
+    pcout << "Coarse cells = " << serial_triangulation.n_active_cells()
+          << std::endl;
+
+  VTKUtils::read_cell_data(vtk_file_path, "vessel_id", cell_vessel_ids);
+  VTKUtils::read_cell_data(vtk_file_path, "a0", cell_a0);
+  VTKUtils::read_cell_data(vtk_file_path, "a_d", cell_a_d);
+  VTKUtils::read_cell_data(vtk_file_path, "E", cell_E);
+  VTKUtils::read_cell_data(vtk_file_path, "h_wall", cell_h_wall);
+  VTKUtils::read_cell_data(vtk_file_path, "p_d", cell_p_d);
+  VTKUtils::read_cell_data(vtk_file_path, "p0", cell_p0);
+  VTKUtils::read_cell_data(vtk_file_path, "L", cell_L);
+  VTKUtils::read_cell_data(vtk_file_path, "r_d", cell_r_d);
+
+  // Tapered radii are optional.
+  try
+    {
+      VTKUtils::read_cell_data(vtk_file_path, "r_in", cell_r_in);
+    }
+  catch (...)
+    {
+      cell_r_in.reinit(0);
+    }
+  try
+    {
+      VTKUtils::read_cell_data(vtk_file_path, "r_out", cell_r_out);
+    }
+  catch (...)
+    {
+      cell_r_out.reinit(0);
+    }
+
+  VTKUtils::read_vertex_data(vtk_file_path, "R1", point_R1);
+  VTKUtils::read_vertex_data(vtk_file_path, "R2", point_R2);
+  VTKUtils::read_vertex_data(vtk_file_path, "C", point_C);
+  VTKUtils::read_vertex_data(vtk_file_path, "P_out", point_P_out);
+  VTKUtils::read_vertex_data(vtk_file_path, "boundary_id", point_boundary_id);
+
+  // Material IDs + boundary IDs from VTK.  These are attributes of the coarse
+  // cells and are inherited by their children through refinement and carried
+  // into the distributed description, so they are available on every rank
+  // afterwards without any communication.
+  {
+    unsigned int cell_idx = 0;
+    for (auto &cell : serial_triangulation.active_cell_iterators())
+      {
+        cell->set_material_id(
+          static_cast<unsigned int>(cell_vessel_ids[cell_idx]));
+        for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+          if (cell->face(f)->at_boundary())
+            {
+              const unsigned int v = cell->face(f)->vertex_index(0);
+              cell->face(f)->set_boundary_id(
+                static_cast<types::boundary_id>(point_boundary_id[v]));
+            }
+        ++cell_idx;
+      }
+  }
+
+  // RCR map, keyed by boundary id: global data, identical on every rank
+  // because every rank reads the same file.
+  rcr_map.clear();
+  for (const auto &cell : serial_triangulation.active_cell_iterators())
+    for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+      if (cell->face(f)->at_boundary())
+        {
+          const types::boundary_id bid = cell->face(f)->boundary_id();
+          if (bid == 0)
+            continue; // inflow
+          const unsigned int v = cell->face(f)->vertex_index(0);
+          RCRPhysics         rcr;
+          rcr.R1    = point_R1[v];
+          rcr.R2    = point_R2[v];
+          rcr.C     = point_C[v];
+          rcr.P_out = point_P_out[v];
+          if (rcr.R2 > 0.0)
+            rcr_map[bid] = rcr;
+        }
+
+  serial_triangulation.refine_global(n_global_refinements);
+
+  // Partition and hand the description to the fully distributed mesh.  The
+  // z-order partitioner keeps a vessel's cells together, which keeps the
+  // number of junctions straddling a subdomain boundary small.
+  GridTools::partition_triangulation_zorder(n_mpi_processes,
+                                            serial_triangulation);
+
+  const auto description =
+    TriangulationDescription::Utilities::create_description_from_triangulation(
+      serial_triangulation, mpi_communicator);
+
+  triangulation.create_triangulation(description);
+  if (verbosity > 0)
+    pcout << "Global active cells = " << triangulation.n_global_active_cells()
+          << std::endl;
+  if (verbosity > 0)
+    {
+      const std::vector<unsigned int> owned =
+        Utilities::MPI::gather(mpi_communicator,
+                               triangulation.n_locally_owned_active_cells());
+      if (this_mpi_process == 0)
+        for (unsigned int r = 0; r < owned.size(); ++r)
+          pcout << "  rank " << r << " owns " << owned[r] << " cells"
+                << std::endl;
+    }
+}
+
+// ============================================================================
+// build_global_vessel_data
+//
+// vessel_map and rcr_map describe the network, not the local part of it: a
+// rank needs the pressure law of every vessel whose cells it can see, and
+// compute_a_d_local() interpolates between a vessel's *global* end radii.  So
+// vessel_map comes from the replicated VTK arrays and the arc-length bounds
+// are reduced over the communicator.  Without the reduction a tapered vessel
+// split across two ranks would get a different a_d on each side of the cut.
+// ============================================================================
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_global_vessel_data()
+{
+  TimerOutput::Scope timer(computing_timer, "build_global_vessel_data");
+
+  vessel_map.clear();
+
+  unsigned int max_vid = 0;
+  for (unsigned int i = 0; i < cell_vessel_ids.size(); ++i)
+    max_vid = std::max(max_vid, static_cast<unsigned int>(cell_vessel_ids[i]));
+  const unsigned int n_vid = max_vid + 1;
+
+  for (unsigned int i = 0; i < cell_vessel_ids.size(); ++i)
+    {
+      const unsigned int vid = static_cast<unsigned int>(cell_vessel_ids[i]);
+      if (vessel_map.count(vid))
+        continue;
+
+      VesselPhysicalProperties vp;
+      vp.a0     = cell_a0[vid];
+      vp.E      = cell_E[vid];
+      vp.h_wall = cell_h_wall[vid];
+      vp.p_d    = cell_p_d[vid];
+      vp.p0     = cell_p0[vid];
+      vp.a_d    = cell_a_d[vid];
+      vp.L      = cell_L[vid];
+      vp.r_d    = cell_r_d[vid];
+      vp.r_in   = (cell_r_in.size() > vid) ? cell_r_in[vid] : 0.0;
+      vp.r_out  = (cell_r_out.size() > vid) ? cell_r_out[vid] : 0.0;
+
+      vessel_map[vid] = vp;
+    }
+
+  // Arc-length bounds: local extrema first, then a global min/max so that
+  // every rank ends up with the same [s_min, s_max] per vessel.
+  std::vector<double> s_min(n_vid, std::numeric_limits<double>::max());
+  std::vector<double> s_max(n_vid, std::numeric_limits<double>::lowest());
+
+  for (const auto &cell : triangulation.active_cell_iterators())
+    {
+      if (!cell->is_locally_owned())
+        continue;
+
+      const unsigned int vid = cell->material_id();
+
+      const Tensor<1, spacedim> d_hat =
+        (cell->vertex(1) - cell->vertex(0)) /
+        cell->vertex(1).distance(cell->vertex(0));
+
+      const double s0 = cell->vertex(0) * d_hat;
+      const double s1 = cell->vertex(1) * d_hat;
+
+      s_min[vid] = std::min(s_min[vid], std::min(s0, s1));
+      s_max[vid] = std::max(s_max[vid], std::max(s0, s1));
+    }
+
+  std::vector<double> global_s_min(n_vid);
+  std::vector<double> global_s_max(n_vid);
+
+  MPI_Allreduce(s_min.data(),
+                global_s_min.data(),
+                n_vid,
+                MPI_DOUBLE,
+                MPI_MIN,
+                mpi_communicator);
+
+  MPI_Allreduce(s_max.data(),
+                global_s_max.data(),
+                n_vid,
+                MPI_DOUBLE,
+                MPI_MAX,
+                mpi_communicator);
+
+  s_min.swap(global_s_min);
+  s_max.swap(global_s_max);
+  vessel_s_bounds.clear();
+  for (const auto &[vid, vp] : vessel_map)
+    {
+      (void)vp;
+      if (s_min[vid] <= s_max[vid])
+        vessel_s_bounds[vid] = std::make_pair(s_min[vid], s_max[vid]);
+    }
+
+  // Terminal boundary ids: derived from rcr_map, which is replicated, so this
+  // set is identical on every rank and needs no reduction.
+  terminal_boundary_ids.clear();
+  for (const auto &[bid, rcr] : rcr_map)
+    {
+      (void)rcr;
+      terminal_boundary_ids.insert(bid);
+    }
+
+  if (verbosity > 0)
+    {
+      pcout << "\n=== vessel arc lengths ===\n  vid   L[mm]\n";
+      for (const auto &[vid, b] : vessel_s_bounds)
+        pcout << "  " << std::setw(3) << vid << "   " << std::setw(10)
+              << (b.second - b.first) * 1000.0 << "\n";
+    }
+}
+
+// ============================================================================
 // detect_junctions
+//
+// Runs over the locally relevant cells (owned + ghost).  The ghost layer is
+// vertex-adjacent, so a rank owning any cell incident to a junction vertex
+// also stores every other cell incident to it: the JunctionInfo it builds is
+// complete, and no rank ever sees a partial junction.
+//
+// The half-faces are sorted by (CellId, face_no) so that every rank that sees
+// a junction orders its vessels identically.  That matters because the row of
+// each junction equation is chosen by position in this list -- without the
+// sort, two ranks could disagree about which row carries mass conservation.
 // ============================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::detect_junctions()
 {
+  TimerOutput::Scope timer(computing_timer, "detect_junctions");
+
   junctions.clear();
   all_junction_faces.clear();
 
@@ -140,29 +427,62 @@ BloodFlowSystem<dim, spacedim>::detect_junctions()
     vertex_to_half_faces;
 
   for (const auto &cell : dof_handler.active_cell_iterators())
-    for (unsigned int v = 0; v < GeometryInfo<dim>::vertices_per_cell; ++v)
-      vertex_to_half_faces[cell->vertex_index(v)].emplace_back(cell, v);
-
-  for (const auto &[v_idx, half_faces] : vertex_to_half_faces)
     {
+      if (cell->is_artificial())
+        continue;
+
+      for (unsigned int v = 0; v < GeometryInfo<dim>::vertices_per_cell; ++v)
+        vertex_to_half_faces[cell->vertex_index(v)].emplace_back(cell, v);
+    }
+
+  unsigned int n_local_junctions = 0;
+
+  for (auto &[v_idx, half_faces] : vertex_to_half_faces)
+    {
+      std::sort(half_faces.begin(),
+                half_faces.end(),
+                [](const auto &a, const auto &b) {
+                  if (a.first->id() != b.first->id())
+                    return a.first->id() < b.first->id();
+                  return a.second < b.second;
+                });
+
       const std::size_t n_inc = half_faces.size();
 
-      // Classify the face types based on how many cells meet at the vertex:
-      // if n_inc == 1                -> boundary (inlet / terminal).  Skip.
-      //  n_inc == 2, same vessel id  -> ordinary interior face skiping.
-      //  n_inc == 2, but different ids -> two vessels joined end-to-end (an
-      //                                    "in-line" connection). Treat as
-      //                                    junction like 2 way junction.
-      // n_inc >= 3                  ->   Junction.
+      // Classify by how many cells meet at the vertex:
+      //   n_inc == 1                    -> boundary (inlet / terminal).
+      //   n_inc == 2, same vessel id    -> ordinary interior face.
+      //   n_inc == 2, different ids     -> two vessels joined end to end, an
+      //                                    in-line connection, treated as a
+      //                                    2-way junction.
+      //   n_inc >= 3                    -> junction.
       if (n_inc == 1)
-        continue; // boundary
+        continue;
 
       if (n_inc == 2)
         {
           const unsigned int vid_a = half_faces[0].first->material_id();
           const unsigned int vid_b = half_faces[1].first->material_id();
           if (vid_a == vid_b)
-            continue; // same vessel -> ordinary interior face, not a junction
+            continue;
+
+          if (unify_two_way_junctions)
+            {
+              if (two_way_pressure_laws_match(vid_a, vid_b))
+                {
+                  // Same p(A) on both sides: the K=2 junction conditions
+                  // reduce to a single unique trace pair.  Demote to an
+                  // interior face, handled by
+                  // assemble_trace_interior_equations() plus the continuity
+                  // rows like every other valence-<=2 face.
+                  continue;
+                }
+              pcout << "WARNING: 2-way node between vessels " << vid_a
+                    << " and " << vid_b
+                    << " has differing pressure laws; keeping the per-vessel\n"
+                       "         junction equations (a unique trace there "
+                       "would violate total-pressure continuity).\n";
+            }
         }
 
       JunctionInfo J;
@@ -180,18 +500,26 @@ BloodFlowSystem<dim, spacedim>::detect_junctions()
         }
 
       junctions.push_back(std::move(J));
+      ++n_local_junctions;
     }
-  std::cout << "Detected " << junctions.size()
-            << " junctions (including 2-way in-line vessel connections)."
-            << std::endl;
+
+  const unsigned int n_global_junctions =
+    Utilities::MPI::sum(n_local_junctions, mpi_communicator);
+  if (verbosity > 0)
+    pcout << "Detected " << n_global_junctions
+          << " junction half-face groups (counting each junction once per rank "
+             "that touches it)."
+          << std::endl;
 }
 
-
 // ============================================================================
-// canonical_face_key :How faces are identified functions
+// canonical_face_key
 //
 // Interior face: key = the half-face whose cell has the smaller CellId.
-// Boundary / junction face:  key = the unique owning cell.
+// Boundary / junction face: key = the unique owning cell.
+//
+// CellId ordering does not depend on the partition, so all ranks agree on the
+// canonical side of a face that straddles a subdomain boundary.
 // ============================================================================
 template <int dim, int spacedim>
 std::pair<CellId, unsigned int>
@@ -202,10 +530,9 @@ BloodFlowSystem<dim, spacedim>::canonical_face_key(
   if (cell->face(face_no)->at_boundary() ||
       is_junction_face(cell->id(), face_no))
     return {cell->id(), face_no};
+
   const auto        &nb         = cell->neighbor(face_no);
-  const unsigned int nb_face_no = cell->neighbor_of_neighbor(
-    face_no); // function finds which local face of the neighboring cell
-              // connects back to the current cell
+  const unsigned int nb_face_no = cell->neighbor_of_neighbor(face_no);
 
   if (cell->id() < nb->id())
     return {cell->id(), face_no};
@@ -214,13 +541,21 @@ BloodFlowSystem<dim, spacedim>::canonical_face_key(
 }
 
 // ============================================================================
-// build_face_dof_map : For every face-
-// what are the global indices of (A_hat,U_hat)
+// build_face_dof_map
 //
-// Assigns two consecutive global DOF indices to every unique face:
-//   index 2k   -> A_hat
-//   index 2k+1 -> U_hat
-// Indices start at n_cell_dofs (== dof_handler.n_dofs()).
+// Records, for every face this rank can reach from one of its locally owned
+// cells, which (A_hat, U_hat) pair is the canonical one.  The indices come
+// straight out of the FESystem, so this map answers "which DoF" and never
+// "whose DoF" -- ownership is read off locally_owned_dofs at the point of
+// use.
+//
+// Both sides of an interior face are locally relevant (the ghost layer is
+// vertex-adjacent), so the canonical indices can always be looked up, even
+// when the canonical cell belongs to another rank.
+//
+// The non-canonical side of an ordinary interior face is a duplicate: this
+// rank owns its two rows whenever it owns that cell, regardless of who owns
+// the canonical side, and ties them down with the continuity rows.
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -229,85 +564,196 @@ BloodFlowSystem<dim, spacedim>::build_face_dof_map()
   TimerOutput::Scope timer(computing_timer, "build_face_dof_map");
 
   face_dof_map.clear();
-  n_cell_dofs  = dof_handler.n_dofs();
-  n_trace_dofs = 0;
+  trace_continuity_pairs.clear();
+
+  std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
+  std::vector<types::global_dof_index> nb_dofs(fe->n_dofs_per_cell());
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
+      if (!(cell->is_locally_owned()))
+        continue;
+
+      cell->get_dof_indices(ldofs);
+
       for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
         {
           const auto key = canonical_face_key(cell, f);
+          // if (cell->face(f)->at_boundary() || is_junction_face(cell->id(),
+          // f))
+          //   {
+          //     std::cout << "Rank " << this_mpi_process
+          //               << " inserting junction key " << key.first << " "
+          //               << key.second << " owned=" <<
+          //               cell->is_locally_owned()
+          //               << " ghost=" << cell->is_ghost() << std::endl;
+          //   }
+          const auto [a_here, u_here] = face_trace_dofs(ldofs, f);
 
-          if (face_dof_map.count(key))
-            continue; // already registered from the other side
+          const bool this_side_is_canonical = (key.first == cell->id());
 
-          const types::global_dof_index a_idx = n_cell_dofs + n_trace_dofs;
-          const types::global_dof_index u_idx = n_cell_dofs + n_trace_dofs + 1;
+          if (this_side_is_canonical)
+            {
+              face_dof_map[key] = FaceTraceDof{a_here, u_here};
+            }
+          else
+            {
+              // The canonical side is the neighbour, owned by this rank or a
+              // ghost.  Either way its DoF indices are readable.
+              const auto        &nb   = cell->neighbor(f);
+              const unsigned int nb_f = cell->neighbor_of_neighbor(f);
+              nb->get_dof_indices(nb_dofs);
+              const auto [a_canon, u_canon] = face_trace_dofs(nb_dofs, nb_f);
 
-          face_dof_map[key] = FaceTraceDof{a_idx, u_idx};
-          n_trace_dofs += 2;
+              face_dof_map[key] = FaceTraceDof{a_canon, u_canon};
+
+              // This cell's own pair is the duplicate side.  Junction and
+              // boundary half-faces are never duplicated: each is its own
+              // canonical owner, so they never reach this branch.
+              if (!cell->face(f)->at_boundary() &&
+                  !is_junction_face(cell->id(), f))
+                trace_continuity_pairs.push_back(
+                  TraceContinuityPair{a_here, u_here, a_canon, u_canon});
+            }
         }
     }
 
-  n_total_dofs = n_cell_dofs + n_trace_dofs;
-
-  std::cout << "Face DOF map: n_cell=" << n_cell_dofs
-            << "  n_trace=" << n_trace_dofs << "  n_total=" << n_total_dofs
-            << std::endl;
+  const types::global_dof_index n_pairs =
+    Utilities::MPI::sum<types::global_dof_index>(trace_continuity_pairs.size(),
+                                                 mpi_communicator);
+  if (verbosity > 0)
+    pcout << "Face DOF map: FE dofs = " << dof_handler.n_dofs()
+          << "  continuity pairs = " << n_pairs << std::endl;
 }
 
 // ==========================================================================
-// build rcr dof map : For every RCR terminal boundary, assign a global DOF
-// index to the capacitor pressure Pc.
-// =========================================================================
+// build_rcr_dof_map
+//
+// One capacitor pressure per RCR terminal with C > 0 or we write R_2 > 0,
+// appended after the FE range.  The terminal boundary ids come from rcr_map,
+// which is replicated, so the enumeration is identical on every rank without
+// communication -- a necessary property, since a global index must mean the
+// same thing everywhere.
+//
+// A Pc index is *owned* by the rank owning the cell that carries the terminal
+// face.  Each terminal face has exactly one incident cell, so this assigns
+// every Pc to exactly one rank and locally_owned_dofs stays a partition.
+// ==========================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::build_rcr_dof_map()
 {
+  TimerOutput::Scope timer(computing_timer, "build_rcr_dof_map");
+
   rcr_pc_dof.clear();
-  n_trace_end = n_cell_dofs + n_trace_dofs;
-  n_rcr_dofs  = 0;
+  n_rcr_dofs = 0;
 
-  // Reflection mode forces ALL outlets to reflection, so no Pc DOFs.
+  const types::global_dof_index first_pc = dof_handler.n_dofs();
+
+  // Numbering: identical on every rank, no communication needed -- rcr_map
+  // is replicated, so every rank enumerates it the same way.
   if (outlet_type != "Reflection")
-    {
-      std::set<types::boundary_id> seen;
-      for (const auto &cell : dof_handler.active_cell_iterators())
-        for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-          {
-            if (!cell->face(f)->at_boundary())
-              continue;
-            if (is_junction_face(cell->id(), f))
-              continue;
+    for (const auto &[bid, rcr] : rcr_map)
+      {
+        if (bid == 0)
+          continue; // inflow
+        if (rcr.C <= 0.0)
+          continue; // single-R terminal carries no capacitor unknown
 
-            const types::boundary_id bid = cell->face(f)->boundary_id();
-            if (bid == 0)
-              continue; // inflow
-            if (!rcr_map.count(bid))
-              continue; // no data → reflection
-            if (rcr_map.at(bid).C <= 0)
-              continue; // single-R → no Pc DOF
-            if (!seen.insert(bid).second)
-              continue;
+        rcr_pc_dof[bid] = first_pc + n_rcr_dofs;
+        ++n_rcr_dofs;
+      }
 
-            rcr_pc_dof[bid] = n_trace_end + n_rcr_dofs;
-            ++n_rcr_dofs;
-          }
-    }
+  n_total_dofs = first_pc + n_rcr_dofs;
 
-  n_total_dofs = n_trace_end + n_rcr_dofs;
-  std::cout << "RCR capacitor DOFs: n_rcr=" << n_rcr_dofs
-            << "  n_total=" << n_total_dofs << std::endl;
+  // Ownership: dof_handler's own FE numbering is already split into
+  // contiguous, rank-ordered blocks with no gaps between them (that's
+  // intrinsic to how a parallel DoFHandler numbers its own dofs -- rank r's
+  // block ends exactly where rank r+1's begins).  The Pc range sits right
+  // after all of that, starting at first_pc.  For a rank's combined FE+Pc
+  // range to be one contiguous interval (which is what PETSc requires),
+  // every Pc must go to the *one* rank whose FE block ends at first_pc -- no
+  // other rank's FE block is adjacent to the Pc range, so splitting the Pc's
+  // up by terminal ownership (or by any other rule) always leaves a gap for
+  // every rank except that one.  Assembly is unaffected: it still happens on
+  // whichever rank owns each terminal's cell, and off-owner contributions
+  // are already routed correctly by the compress(VectorOperation::add)
+  // calls used throughout this file.
+  unsigned int local_candidate = n_mpi_processes; // sentinel: "not me"
+  if (first_pc > 0 && dof_handler.locally_owned_dofs().is_element(first_pc - 1))
+    local_candidate = this_mpi_process;
+
+  const unsigned int pc_owner =
+    Utilities::MPI::min(local_candidate, mpi_communicator);
+
+  Assert(pc_owner < n_mpi_processes,
+         ExcMessage("Could not find the rank owning the last FE DoF."));
+
+  rcr_dofs_owned.clear();
+  rcr_dofs_owned.set_size(n_total_dofs);
+  if (this_mpi_process == pc_owner)
+    for (types::global_dof_index i = first_pc; i < n_total_dofs; ++i)
+      rcr_dofs_owned.add_index(i);
+  rcr_dofs_owned.compress();
+
+  Assert(Utilities::MPI::sum<types::global_dof_index>(
+           rcr_dofs_owned.n_elements(), mpi_communicator) == n_rcr_dofs,
+         ExcMessage("Every capacitor DOF must be owned by exactly one rank."));
+  if (verbosity > 0)
+    pcout << "RCR capacitor DOFs: n_rcr = " << n_rcr_dofs
+          << "  n_total = " << n_total_dofs << std::endl;
 }
 
+// ============================================================================
+// update_ghosted_vectors
+//
+// The single point where the solver communicates during assembly: copy the
+// locally owned `y` into the two ghosted read vectors.  Everything that
+// follows reads from these and writes only owned rows, so no assembly routine
+// needs a reduction of its own.
+// ============================================================================
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::update_ghosted_vectors(
+  const VectorType &y) const
+{
+  TimerOutput::Scope timer(computing_timer, "update_ghosted_vectors");
+
+
+  y_relevant = y;
+  // std::cout << "Rank " << this_mpi_process << '\n'
+  //           << "  y size        = " << y.size() << '\n'
+  //           << "  owned dofs    = " << locally_owned_dofs.n_elements() <<
+  //           '\n'
+  //           << "  owned FE dofs = " << locally_owned_fe_dofs.n_elements()
+  //           << '\n'
+  //           << "  range = [" << y.local_range().first << ", "
+  //           << y.local_range().second << ")\n";
+  const auto range = y.local_range();
+
+  for (const auto i : locally_owned_fe_dofs)
+    {
+      if (i < range.first || i >= range.second)
+        {
+          std::cout << "Rank " << this_mpi_process << " invalid FE index " << i
+                    << " local range [" << range.first << "," << range.second
+                    << ")\n";
+          std::abort();
+        }
+
+      y_fe_owned(i) = y(i);
+    }
+  y_fe_owned.compress(VectorOperation::insert);
+  y_fe_relevant = y_fe_owned;
+}
 
 // ============================================================================
-// get_face_trace : it extracts trace values from global HDG solution
+// get_face_trace
 // ============================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::get_face_trace(
-  const Vector<double>                                           &y,
+  const VectorType                                               &y,
   const typename DoFHandler<dim, spacedim>::active_cell_iterator &cell,
   const unsigned int                                              face_no,
   double                                                         &A_hat,
@@ -319,20 +765,212 @@ BloodFlowSystem<dim, spacedim>::get_face_trace(
   Assert(it != face_dof_map.end(),
          ExcMessage("Face not found in face_dof_map."));
 
-  A_hat = y[it->second.a_hat_dof];
-  U_hat = y[it->second.u_hat_dof];
+  A_hat = y(it->second.a_hat_dof);
+  U_hat = y(it->second.u_hat_dof);
 }
 
 // ============================================================================
-// build_extended_sparsity_pattern: it constructs the sparsity pattern of the
-// Jacobian J = (J_cc  J_ct;   J_tc J_tt) where c=cell dofs, t=trace dofs
+// Sparsity
 //
-// Builds a DynamicSparsityPattern for the full n_total × n_total system.
-// Coupling rules:
-//   Cell i <-> cell j       if they share a face  (standard DG)
-//   Cell i <-> trace (f)    for every face f of cell i
-//   Trace (f) <-> cell i    for every cell incident to face f
-//   Trace (f) <-> trace (g) for every pair of traces sharing a junction vertex
+// Every builder below mirrors, one for one, the ownership guards used by the
+// matching assembly routine: a rank inserts a row into the pattern exactly
+// when it will later write that row.  Keeping the two in step is what allows
+// jacobian_matrix.reinit() to be given locally_owned_dofs as its row map.
+// ============================================================================
+
+// Cell rows: volume terms and the face flux against this cell's own trace.
+// The neighbour columns are kept so the pattern also covers the trace rows'
+// dependence on the two incident cells, assembled in build_trace_sparsity().
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_cell_sparsity(DynamicSparsityPattern &dsp)
+{
+  std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
+  std::vector<types::global_dof_index> nb_dofs(fe->n_dofs_per_cell());
+
+  for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+      if (!cell->is_locally_owned())
+        continue;
+
+      cell->get_dof_indices(ldofs);
+
+      for (const auto i : ldofs)
+        for (const auto j : ldofs)
+          dsp.add(i, j);
+
+      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        {
+          if (cell->face(f)->at_boundary())
+            continue;
+
+          cell->neighbor(f)->get_dof_indices(nb_dofs);
+          for (const auto i : ldofs)
+            for (const auto j : nb_dofs)
+              dsp.add(i, j);
+        }
+    }
+}
+
+// Trace rows of interior and boundary faces: coupled to their own pair and to
+// the cell DoFs on both sides of the face.
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_trace_sparsity(
+  DynamicSparsityPattern &dsp)
+{
+  std::vector<types::global_dof_index> cell_dofs(fe->n_dofs_per_cell());
+  std::vector<types::global_dof_index> nb_dofs(fe->n_dofs_per_cell());
+
+  for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+      if (!cell->is_locally_owned())
+        continue;
+
+      cell->get_dof_indices(cell_dofs);
+
+      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        {
+          const auto it = face_dof_map.find(canonical_face_key(cell, f));
+          if (it == face_dof_map.end())
+            continue;
+
+          const auto a_hat = it->second.a_hat_dof;
+          const auto u_hat = it->second.u_hat_dof;
+
+          // Rows belonging to a canonical side on another rank are that
+          // rank's business.
+          if (!locally_owned_dofs.is_element(a_hat))
+            continue;
+
+          dsp.add(a_hat, a_hat);
+          dsp.add(a_hat, u_hat);
+          dsp.add(u_hat, a_hat);
+          dsp.add(u_hat, u_hat);
+
+          for (const auto ci : cell_dofs)
+            {
+              dsp.add(a_hat, ci);
+              dsp.add(u_hat, ci);
+            }
+
+          if (!cell->face(f)->at_boundary())
+            {
+              cell->neighbor(f)->get_dof_indices(nb_dofs);
+              for (const auto ni : nb_dofs)
+                {
+                  dsp.add(a_hat, ni);
+                  dsp.add(u_hat, ni);
+                }
+            }
+        }
+    }
+}
+
+// Junction rows: fully coupled among the 2K trace unknowns, plus the cell
+// DoFs feeding each vessel's Riemann invariant.
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_junction_sparsity(
+  DynamicSparsityPattern &dsp)
+{
+  std::vector<types::global_dof_index> cell_dofs(fe->n_dofs_per_cell());
+
+  for (const auto &J : junctions)
+    {
+      const unsigned int K = J.n_vessels();
+
+      std::vector<types::global_dof_index> a_row(K), u_row(K);
+      std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
+
+      for (unsigned int i = 0; i < K; ++i)
+        {
+          J.half_faces[i].cell->get_dof_indices(ldofs);
+
+          const auto [a_hat_dof, u_hat_dof] =
+            face_trace_dofs(ldofs, J.half_faces[i].face_no);
+
+          a_row[i] = a_hat_dof;
+          u_row[i] = u_hat_dof;
+        }
+      for (unsigned int i = 0; i < K; ++i)
+        for (const auto row : {a_row[i], u_row[i]})
+          {
+            if (!locally_owned_dofs.is_element(row))
+              continue;
+
+            for (unsigned int j = 0; j < K; ++j)
+              {
+                dsp.add(row, a_row[j]);
+                dsp.add(row, u_row[j]);
+
+                J.half_faces[j].cell->get_dof_indices(cell_dofs);
+                for (const auto cj : cell_dofs)
+                  dsp.add(row, cj);
+              }
+          }
+    }
+}
+
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_rcr_sparsity(DynamicSparsityPattern &dsp)
+{
+  for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+      if (!cell->is_locally_owned())
+        continue;
+
+      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        {
+          if (!cell->face(f)->at_boundary())
+            continue;
+          if (is_junction_face(cell->id(), f))
+            continue;
+
+          const auto pit = rcr_pc_dof.find(cell->face(f)->boundary_id());
+          if (pit == rcr_pc_dof.end())
+            continue;
+
+          const auto it = face_dof_map.find(canonical_face_key(cell, f));
+          if (it == face_dof_map.end())
+            continue;
+
+          const auto pc = pit->second;
+
+          // Both the Pc row and the boundary trace rows are owned here: the
+          // terminal face has this cell as its only neighbour.
+          dsp.add(pc, pc);
+          dsp.add(pc, it->second.a_hat_dof);
+          dsp.add(pc, it->second.u_hat_dof);
+          dsp.add(it->second.a_hat_dof, pc);
+        }
+    }
+}
+
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::build_trace_continuity_sparsity(
+  DynamicSparsityPattern &dsp)
+{
+  // The duplicate side is always a locally owned cell's own pair, so these
+  // rows are owned by construction.
+  for (const auto &p : trace_continuity_pairs)
+    {
+      dsp.add(p.a_dup, p.a_dup);
+      dsp.add(p.a_dup, p.a_canon);
+      dsp.add(p.u_dup, p.u_dup);
+      dsp.add(p.u_dup, p.u_canon);
+    }
+}
+
+// ============================================================================
+// build_extended_sparsity_pattern
+//
+// The pattern is assembled locally over the relevant rows, exchanged with
+// SparsityTools::distribute_sparsity_pattern() so that each rank learns the
+// off-rank entries written into rows it owns, and then handed to the
+// matrices with locally_owned_dofs as the row map.
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -340,118 +978,27 @@ BloodFlowSystem<dim, spacedim>::build_extended_sparsity_pattern()
 {
   TimerOutput::Scope timer(computing_timer, "build_extended_sparsity_pattern");
 
-  DynamicSparsityPattern dsp(n_total_dofs, n_total_dofs);
+  DynamicSparsityPattern dsp(n_total_dofs, n_total_dofs, locally_relevant_dofs);
 
-  // ---- (1a) Cell–cell coupling via make_flux_sparsity_pattern ---------------
-  // make_flux_sparsity_pattern requires sparsity.n_rows() ==
-  // dof_handler.n_dofs()
-  // (== n_cell_dofs).  Build it on a separate cell-sized DSP and copy entries
-  // into the extended one so the row/column indices stay in [0, n_cell_dofs).
-  {
-    DynamicSparsityPattern cell_dsp(n_cell_dofs, n_cell_dofs);
-    DoFTools::make_flux_sparsity_pattern(dof_handler,
-                                         cell_dsp); // standard DG sparsity
+  build_cell_sparsity(dsp);
+  build_trace_sparsity(dsp);
+  build_junction_sparsity(dsp);
+  build_rcr_sparsity(dsp);
+  build_trace_continuity_sparsity(dsp);
 
-    for (const auto &entry : cell_dsp)
-      dsp.add(entry.row(), entry.column());
-  }
+  SparsityTools::distribute_sparsity_pattern(dsp,
+                                             locally_owned_dofs,
+                                             mpi_communicator,
+                                             locally_relevant_dofs);
 
-  // ---- (1b) Cell–trace and trace–trace couplings ---------------------------
-  for (const auto &cell : dof_handler.active_cell_iterators())
-    {
-      std::vector<types::global_dof_index> cell_dofs(fe->n_dofs_per_cell());
-      cell->get_dof_indices(cell_dofs);
-
-      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-        {
-          const auto key = canonical_face_key(cell, f);
-          const auto it  = face_dof_map.find(key);
-          Assert(it != face_dof_map.end(), ExcInternalError());
-
-          const types::global_dof_index a_hat = it->second.a_hat_dof;
-          const types::global_dof_index u_hat = it->second.u_hat_dof;
-
-          // Cell DOFs <-> their face trace DOFs (both blocks, both directions)
-          for (const types::global_dof_index ci : cell_dofs)
-            {
-              dsp.add(ci, a_hat);
-              dsp.add(ci, u_hat);
-              dsp.add(a_hat, ci);
-              dsp.add(u_hat, ci);
-            }
-
-          // Trace self-coupling (needed for trace–trace Jacobian rows)
-          dsp.add(a_hat, a_hat);
-          dsp.add(a_hat, u_hat);
-          dsp.add(u_hat, a_hat);
-          dsp.add(u_hat, u_hat);
-
-          // For interior faces: trace rows also couple to the neighbour's cell
-          // DOFs (trace equation R uses cell values from both sides)
-          if (!cell->face(f)->at_boundary())
-            {
-              const auto                          &nb = cell->neighbor(f);
-              std::vector<types::global_dof_index> nb_dofs(
-                fe->n_dofs_per_cell());
-              nb->get_dof_indices(nb_dofs);
-
-              for (const types::global_dof_index ni : nb_dofs)
-                {
-                  dsp.add(a_hat, ni); // J(R_t, w_{l/r})
-                  dsp.add(u_hat, ni);
-                }
-            }
-        }
-    }
-
-  // ---- (2) Junction: all K trace-pairs couple to each other ----------------
-  for (const auto &J : junctions)
-    {
-      const unsigned int K = J.n_vessels();
-
-      std::vector<std::pair<types::global_dof_index, types::global_dof_index>>
-        tdofs(K);
-
-      for (unsigned int i = 0; i < K; ++i)
-        {
-          const auto key =
-            canonical_face_key(J.half_faces[i].cell, J.half_faces[i].face_no);
-          const auto it = face_dof_map.find(key);
-          Assert(it != face_dof_map.end(), ExcInternalError());
-          tdofs[i] = {it->second.a_hat_dof, it->second.u_hat_dof};
-        }
-
-      for (unsigned int i = 0; i < K; ++i)
-        for (unsigned int j = 0; j < K; ++j)
-          {
-            dsp.add(tdofs[i].first, tdofs[j].first);
-            dsp.add(tdofs[i].first, tdofs[j].second);
-            dsp.add(tdofs[i].second, tdofs[j].first);
-            dsp.add(tdofs[i].second, tdofs[j].second);
-          }
-    }
-
-  // ---- (3) RCR capacitor DOFs: couple to their face traces ----------------
-  for (const auto &cell : dof_handler.active_cell_iterators())
-    for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-      {
-        if (!cell->face(f)->at_boundary())
-          continue;
-        if (is_junction_face(cell->id(), f))
-          continue;
-        const auto pit = rcr_pc_dof.find(cell->face(f)->boundary_id());
-        if (pit == rcr_pc_dof.end())
-          continue;
-
-        const types::global_dof_index pc = pit->second;
-        const auto &td = face_dof_map.at(canonical_face_key(cell, f));
-
-        dsp.add(pc, pc);
-        dsp.add(pc, td.a_hat_dof); // dR_pc/dÂ
-        dsp.add(pc, td.u_hat_dof); // dR_pc/dÛ
-        dsp.add(td.a_hat_dof, pc); // res_A now depends on Pc
-      }
-  sparsity_pattern.copy_from(dsp);
+  jacobian_matrix.reinit(locally_owned_dofs,
+                         locally_owned_dofs,
+                         dsp,
+                         mpi_communicator);
+  linear_system_matrix.reinit(locally_owned_dofs,
+                              locally_owned_dofs,
+                              dsp,
+                              mpi_communicator);
 }
 
 // ============================================================================
@@ -463,108 +1010,125 @@ BloodFlowSystem<dim, spacedim>::setup_system()
 {
   TimerOutput::Scope timer(computing_timer, "setup_system");
 
-  // ---- vessel map ----------------------------------------------------------
-  vessel_map.clear();
-  for (const auto &cell : triangulation.active_cell_iterators())
-    {
-      const unsigned int vid = cell->material_id();
-      if (vessel_map.count(vid))
-        continue;
-      VesselPhysicalProperties vp;
-      vp.a0     = cell_a0[vid];
-      vp.E      = cell_E[vid];
-      vp.h_wall = cell_h_wall[vid];
-      vp.p_d    = cell_p_d[vid];
-      vp.p0     = cell_p0[vid];
-      vp.a_d    = cell_a_d[vid];
-      vp.L      = cell_L[vid];
-      vp.r_d    = cell_r_d[vid];
-      vp.r_in   = (cell_r_in.size() > vid) ? cell_r_in[vid] : 0.0;
-      vp.r_out  = (cell_r_out.size() > vid) ? cell_r_out[vid] : 0.0;
-
-      vessel_map[vid] = vp;
-    }
-
-
-  // ---- vessel arc-length bounds ---------------------------------------
-  vessel_s_bounds.clear();
-
-  for (const auto &cell : dof_handler.active_cell_iterators())
-    {
-      const unsigned int vid = cell->material_id();
-
-      const Tensor<1, spacedim> d_hat = compute_directional_vector(cell);
-
-      const double s0 = cell->vertex(0) * d_hat;
-      const double s1 = cell->vertex(1) * d_hat;
-
-      const double smin_cell = std::min(s0, s1);
-      const double smax_cell = std::max(s0, s1);
-
-      if (!vessel_s_bounds.count(vid))
-        vessel_s_bounds[vid] = std::make_pair(smin_cell, smax_cell);
-      else
-        {
-          vessel_s_bounds[vid].first =
-            std::min(vessel_s_bounds[vid].first, smin_cell);
-
-          vessel_s_bounds[vid].second =
-            std::max(vessel_s_bounds[vid].second, smax_cell);
-        }
-    }
-
-  std::cout << "\n=== vessel lengths: solver vs Table-1 ===\n";
-  std::cout << "  vid   L_solver[mm]\n";
-  for (const auto &[vid, b] : vessel_s_bounds)
-    std::cout << "  " << std::setw(3) << vid << "   " << std::setw(10)
-              << (b.second - b.first) * 1000.0 << "\n";
-  for (const auto &cell : dof_handler.active_cell_iterators())
-    if (cell->material_id() == 0)
-      {
-        const auto dh = compute_directional_vector(cell);
-        std::cout << "v0=" << cell->vertex(0) << "  v1=" << cell->vertex(1)
-                  << "  |v1-v0|=" << cell->vertex(0).distance(cell->vertex(1))
-                  << "  d_hat=" << dh << "  s0=" << (cell->vertex(0) * dh)
-                  << "  s1=" << (cell->vertex(1) * dh) << "\n";
-      }
-  // ---- FE space (cell unknowns only) ---------------------------------------
   if (!fe)
     fe = std::make_unique<FESystem<dim, spacedim>>(
-      FE_DGQ<dim, spacedim>(fe_degree), 2);
+      FE_DGQ<dim, spacedim>(fe_degree),
+      2, // comps 0,1 : cell A, U (DG)
+      FE_DGQ<dim, spacedim>(1),
+      2); // comps 2,3 : trace A_hat, U_hat
 
   dof_handler.distribute_dofs(*fe);
 
-  // ---- junction detection + face DOF map -----------------------------------
-  junctions.clear();
-  all_junction_faces.clear();
-  detect_junctions();
-  build_face_dof_map();
-  build_rcr_dof_map();
-  // ---- sparsity + matrices --------------------------------------------------
-  build_extended_sparsity_pattern();
+  // DoFRenumbering::component_wise() is deliberately not applied.  It would
+  // not produce a global [cell | trace] block layout in parallel -- it
+  // renumbers within each rank's owned range -- and nothing needs one: the
+  // component index sets below take over every role the old integer ranges
+  // played.
 
-  jacobian_matrix.reinit(sparsity_pattern);
-  linear_system_matrix.reinit(sparsity_pattern);
+  // Global network data first: everything downstream (junction detection via
+  // the pressure laws, compute_a_d_local() via the arc-length bounds) reads
+  // it.
+  build_global_vessel_data();
 
-  // Solution vector covers cell + trace DOFs
-  solution.reinit(n_total_dofs);
-  solution_dot.reinit(n_total_dofs);
-  pressure.reinit(n_total_dofs);
-  theoretical_peak.reinit(n_total_dofs);
-
-  // ---- terminal boundary IDs -----------------------------------------------
-  terminal_boundary_ids.clear();
-  for (const auto &cell : triangulation.active_cell_iterators())
-    for (unsigned int f : cell->face_indices())
-      if (cell->face(f)->at_boundary())
-        {
-          const unsigned int bid = cell->face(f)->boundary_id();
-          if (rcr_map.count(bid))
-            terminal_boundary_ids.insert(bid);
-        }
   if (outlet_type == "RCR")
     AssertThrow(!terminal_boundary_ids.empty(),
-                ExcMessage("No terminal boundaries found."));
+                ExcMessage("No terminal boundaries found anywhere in the "
+                           "network."));
+
+  detect_junctions();
+  build_face_dof_map();
+  build_rcr_dof_map(); // sets n_total_dofs and rcr_dofs_owned
+
+  // ---- index sets ---------------------------------------------------------
+  locally_owned_fe_dofs = dof_handler.locally_owned_dofs();
+
+  locally_relevant_fe_dofs =
+    DoFTools::extract_locally_relevant_dofs(dof_handler);
+
+  locally_owned_dofs.clear();
+  locally_owned_dofs.set_size(n_total_dofs);
+  locally_owned_dofs.add_indices(locally_owned_fe_dofs);
+  locally_owned_dofs.add_indices(rcr_dofs_owned);
+  locally_owned_dofs.compress();
+  locally_relevant_dofs.clear();
+  locally_relevant_dofs.set_size(n_total_dofs);
+  locally_relevant_dofs.add_indices(locally_relevant_fe_dofs);
+  locally_relevant_dofs.add_indices(rcr_dofs_owned);
+
+  // A rank reads Pc only for terminals whose cell it owns, but make every Pc
+  // it can reach through a ghost relevant as well so that diagnostics and
+  // output can read them without a special case.
+  for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+      if (cell->is_artificial())
+        continue;
+
+      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        {
+          if (!cell->face(f)->at_boundary())
+            continue;
+          const auto it = rcr_pc_dof.find(cell->face(f)->boundary_id());
+          if (it != rcr_pc_dof.end())
+            locally_relevant_dofs.add_index(it->second);
+        }
+    }
+  locally_relevant_dofs.compress();
+
+  // Component index sets: the differential rows of the DAE (cell A, U and the
+  // capacitor pressures) versus the algebraic ones (the traces).  Taken from
+  // a ComponentMask, so they are right with or without renumbering.
+  {
+    const ComponentMask cell_mask({true, true, false, false});
+    const ComponentMask trace_mask({false, false, true, true});
+
+    const IndexSet cell_fe  = DoFTools::extract_dofs(dof_handler, cell_mask);
+    const IndexSet trace_fe = DoFTools::extract_dofs(dof_handler, trace_mask);
+
+    cell_dofs_owned.clear();
+    cell_dofs_owned.set_size(n_total_dofs);
+    cell_dofs_owned.add_indices(cell_fe);
+    cell_dofs_owned.compress();
+
+    trace_dofs_owned.clear();
+    trace_dofs_owned.set_size(n_total_dofs);
+    trace_dofs_owned.add_indices(trace_fe);
+    trace_dofs_owned.compress();
+  }
+
+  for (const auto i : locally_owned_fe_dofs)
+    {
+      if (!locally_owned_dofs.is_element(i))
+        {
+          std::cout << "Rank " << this_mpi_process
+                    << " FE DoF missing from system IndexSet: " << i
+                    << std::endl;
+        }
+    }
+  // ---- sparsity + matrices ------------------------------------------------
+  build_extended_sparsity_pattern();
+
+  // ---- vectors ------------------------------------------------------------
+  solution.reinit(locally_owned_dofs, mpi_communicator);
+  solution_dot.reinit(locally_owned_dofs, mpi_communicator);
+  pressure.reinit(locally_owned_dofs, mpi_communicator);
+  residual_F.reinit(locally_owned_dofs, mpi_communicator);
+
+  y_relevant.reinit(locally_owned_dofs,
+                    locally_relevant_dofs,
+                    mpi_communicator);
+  y_fe_owned.reinit(locally_owned_fe_dofs, mpi_communicator);
+  y_fe_relevant.reinit(locally_owned_fe_dofs,
+                       locally_relevant_fe_dofs,
+                       mpi_communicator);
+  AssertThrow(y_fe_relevant.size() == dof_handler.n_dofs(), ExcInternalError());
+  if (verbosity > 0)
+    pcout << "  cell DoFs (differential): "
+          << Utilities::MPI::sum<types::global_dof_index>(
+               cell_dofs_owned.n_elements(), mpi_communicator)
+          << "\n  trace DoFs (algebraic)  : "
+          << Utilities::MPI::sum<types::global_dof_index>(
+               trace_dofs_owned.n_elements(), mpi_communicator)
+          << "\n  total DoFs              : " << n_total_dofs << std::endl;
 }
 
 // ============================================================================
@@ -578,6 +1142,9 @@ BloodFlowSystem<dim, spacedim>::initialize_terminal_capacitors()
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       const unsigned int vid = cell->material_id();
       const auto        &vpp = vessel_map.at(vid);
 
@@ -590,11 +1157,7 @@ BloodFlowSystem<dim, spacedim>::initialize_terminal_capacitors()
 
           const types::boundary_id bid = cell->face(f)->boundary_id();
           if (bid != 0 && is_terminal_boundary(bid))
-            {
-              terminal_Pc_storage.try_emplace(bid, vpp.p_d);
-              std::cout << "  [Init] Boundary " << bid << " (Vessel " << vid
-                        << ") Pc = " << vpp.p_d << " Pa\n";
-            }
+            terminal_Pc_storage.try_emplace(bid, vpp.p_d);
         }
     }
 }
@@ -604,257 +1167,202 @@ BloodFlowSystem<dim, spacedim>::initialize_terminal_capacitors()
 // ============================================================================
 template <int dim, int spacedim>
 void
-BloodFlowSystem<dim, spacedim>::compute_initial_solution(Vector<double> &dst,
+BloodFlowSystem<dim, spacedim>::compute_initial_solution(VectorType &dst,
                                                          const double /*t*/)
 {
   TimerOutput::Scope timer(computing_timer, "compute_initial_solution");
 
-  dst.reinit(n_total_dofs);
+  dst = 0.0;
 
-  // ---- cell block -----------------------------------------------------------
+  // ---- cell block and this cell's own trace pair --------------------------
+  // Both are DoFs of a locally owned cell, hence owned here, so the whole
+  // loop writes with insert semantics and no row is touched twice.
+  std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
+
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
-      // const unsigned int vid = cell->material_id();
-      // const auto        &vpp = vessel_map.at(vid);
-      const double                         a_d_local = compute_a_d_local(cell);
-      std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
+      if (!cell->is_locally_owned())
+        continue;
+
       cell->get_dof_indices(ldofs);
+      const double a_d_local = compute_a_d_local(cell);
 
       for (unsigned int i = 0; i < fe->n_dofs_per_cell(); ++i)
         {
           const unsigned int comp = fe->system_to_component_index(i).first;
-          dst[ldofs[i]]           = (comp == 0) ? a_d_local : 0.0;
+          dst(ldofs[i])           = (comp == 0) ? a_d_local : 0.0;
+        }
+
+      // Trace: seed A_hat with the diastolic area at that face and U_hat with
+      // zero, which is consistent for every face type (inflow, terminal,
+      // interior and junction all start from a flux A_hat*U_hat*bn = 0).
+      // Seeding both sides of an interior face from the same rule also starts
+      // the continuity residual at zero.
+      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        {
+          const auto [a_here, u_here] = face_trace_dofs(ldofs, f);
+          dst(a_here)                 = compute_a_d_at_face(cell, f);
+          dst(u_here)                 = 0.0;
         }
     }
 
-  // ---- trace block --------------------------------------------------------
-  std::set<std::pair<CellId, unsigned int>> visited;
+  // ---- capacitor block ----------------------------------------------------
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
-      // const unsigned int vid = cell->material_id();
-      // const auto        &vpp = vessel_map.at(vid);
+      if (!cell->is_locally_owned())
+        continue;
 
       for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
         {
-          const auto key = canonical_face_key(cell, f);
-          if (visited.count(key))
+          if (!cell->face(f)->at_boundary())
             continue;
-          visited.insert(key);
+          if (is_junction_face(cell->id(), f))
+            continue;
 
-          const FaceTraceDof &td = face_dof_map.at(key);
+          const auto pit = rcr_pc_dof.find(cell->face(f)->boundary_id());
+          if (pit == rcr_pc_dof.end())
+            continue;
 
-          if (cell->face(f)->at_boundary() && !is_junction_face(cell->id(), f))
-            {
-              const types::boundary_id bid      = cell->face(f)->boundary_id();
-              const double             ad_local = compute_a_d_at_face(cell, f);
-              if (bid == 0) // inflow: A_hat*U_hat = Q_in(0)
-                {
-                  dst[td.a_hat_dof] = ad_local;
-                  dst[td.u_hat_dof] = 0.0; // consistent velocity
-                }
-              else // RCR or reflection outlet: already consistent with U=0
-                {
-                  dst[td.a_hat_dof] = ad_local;
-                  dst[td.u_hat_dof] = 0.0;
-                }
-            }
-          else if (!cell->face(f)->at_boundary() &&
-                   !is_junction_face(cell->id(), f))
-            {
-              const double ad_local = compute_a_d_local(cell);
-              // Interior: average area, zero velocity (flux = A*U*bn = 0 )
-
-              dst[td.a_hat_dof] =
-                0.5 * (ad_local + compute_a_d_at_face(cell->neighbor(f), f));
-              dst[td.u_hat_dof] = 0.0;
-            }
-          else
-            {
-              const double ad_local = compute_a_d_at_face(cell, f);
-              // Junction: each vessel uses its own diastolic area
-              dst[td.a_hat_dof] = ad_local;
-              dst[td.u_hat_dof] = 0.0;
-            }
+          dst(pit->second) = vessel_map.at(cell->material_id()).p_d;
         }
     }
 
-  for (const auto &cell : dof_handler.active_cell_iterators())
-    for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-      {
-        if (!cell->face(f)->at_boundary())
-          continue;
-        if (is_junction_face(cell->id(), f))
-          continue;
-        const auto pit = rcr_pc_dof.find(cell->face(f)->boundary_id());
-        if (pit == rcr_pc_dof.end())
-          continue;
-        dst[pit->second] = vessel_map.at(cell->material_id()).p_d;
-      }
+  dst.compress(VectorOperation::insert);
 }
 
 // ============================================================================
 // initialize_trace_unknowns
+//
+// Newton on the algebraic rows only, with the cell and capacitor rows pinned
+// by an identity so the same distributed matrix and solver can be reused.
 // ============================================================================
 template <int dim, int spacedim>
 void
-BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(Vector<double> &sol,
-                                                          const double    t)
+BloodFlowSystem<dim, spacedim>::initialize_trace_unknowns(VectorType  &sol,
+                                                          const double t)
 {
   TimerOutput::Scope timer(computing_timer, "initialize_trace_unknowns");
 
-  Assert(sol.size() == n_total_dofs,
-         ExcDimensionMismatch(sol.size(), n_total_dofs));
+  const double       tol      = 1.0e-8;
+  const unsigned int max_iter = 50;
+  if (verbosity > 0)
+    pcout << "\n=== initialize_trace_unknowns (Newton) ===\n";
 
-  const double tol      = 1.0e-9;
-  const int    max_iter = 50;
+  VectorType G(locally_owned_dofs, mpi_communicator);
+  VectorType rhs(locally_owned_dofs, mpi_communicator);
+  VectorType delta(locally_owned_dofs, mpi_communicator);
 
-  std::cout << "\n=== initialize_trace_unknowns (Newton) ===\n";
-
-  SparseMatrix<double> newton_matrix(sparsity_pattern);
-  SparseDirectUMFPACK  newton_solver;
-
-  for (int iter = 0; iter < max_iter; ++iter)
+  for (unsigned int iter = 0; iter < max_iter; ++iter)
     {
-      // ── Step 1 ─ Assemble G(yhat) = F_trace(y_cell^0, yhat) ─────────────
-      Vector<double> G(n_total_dofs);
-      assemble_trace_interior_equations(sol, G);
-      assemble_trace_boundary_equations(t, sol, G);
-      assemble_trace_junction_equations(sol, G);
+      update_ghosted_vectors(sol);
 
-      // ── Convergence check ──── CHANGED: loop only over trace, not Pc ─────
-      double gnorm_inf = 0.0;
-      double gnorm_l2  = 0.0;
-      for (types::global_dof_index i = n_cell_dofs; i < n_trace_end; ++i)
-        {
-          const double val = std::abs(G[i]);
-          gnorm_inf        = std::max(gnorm_inf, val);
-          gnorm_l2 += val * val;
-        }
-      gnorm_l2 = std::sqrt(gnorm_l2);
+      // ---- G(yhat) = F_trace(y_cell^0, yhat) ------------------------------
+      G = 0.0;
+      assemble_trace_interior_equations(y_relevant, G);
+      assemble_trace_boundary_equations(t, y_relevant, G);
+      assemble_trace_junction_equations(y_relevant, G);
+      assemble_trace_continuity_equations(y_relevant, G);
+      G.compress(VectorOperation::add);
 
-      std::cout << "  iter " << std::setw(3) << iter
-                << "  ||G||_inf = " << std::scientific << std::setprecision(4)
-                << gnorm_inf << "  ||G||_l2 = " << gnorm_l2 << "\n";
+      // ---- convergence, over the algebraic rows only ----------------------
+      double gnorm_inf_local = 0.0;
+      for (const auto i : trace_dofs_owned)
+        gnorm_inf_local = std::max(gnorm_inf_local, std::abs(G(i)));
+
+      const double gnorm_inf =
+        Utilities::MPI::max(gnorm_inf_local, mpi_communicator);
+      if (verbosity > 0)
+        pcout << "  iter " << std::setw(3) << iter
+              << "  ||G||_inf = " << std::scientific << std::setprecision(4)
+              << gnorm_inf << "\n";
 
       if (gnorm_inf < tol)
         {
-          std::cout << "  Converged in " << iter << " Newton iteration(s).\n";
+          if (verbosity > 0)
+            pcout << "  Converged in " << iter << " Newton iteration(s).\n";
           break;
         }
 
       if (iter == max_iter - 1)
         {
-          std::cerr << "WARNING: initialize_trace_unknowns did not converge.\n"
-                    << "         tol=" << tol << "  ||G||_inf=" << gnorm_inf
-                    << "  after " << max_iter << " iterations.\n";
+          pcout << "WARNING: initialize_trace_unknowns did not converge.\n"
+                << "         tol=" << tol << "  ||G||_inf=" << gnorm_inf
+                << "  after " << max_iter << " iterations.\n";
           break;
         }
 
-      // ── Step 2 ─ Assemble J_tt ──────────────────────────────────────────
-      newton_matrix = 0.0;
-
-      assemble_jacobian_trace_interior_block(sol);
-      assemble_jacobian_trace_boundary_block(t, sol);
-      assemble_jacobian_trace_junction_block(sol);
-
-      // No is_pc_row branch needed any more since we don't touch Pc rows.
-      for (types::global_dof_index i = n_cell_dofs; i < n_trace_end; ++i)
-        {
-          for (auto it = jacobian_matrix.begin(i); it != jacobian_matrix.end(i);
-               ++it)
-            newton_matrix.add(i, it->column(), it->value());
-        }
-
-      // Stamp cell diagonal with 1
-      for (const auto &cell : dof_handler.active_cell_iterators())
-        {
-          std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
-          cell->get_dof_indices(ldofs);
-          for (const auto idx : ldofs)
-            newton_matrix.set(idx, idx, 1.0);
-        }
-
-
-      for (const auto &[bid, pc_dof] : rcr_pc_dof)
-        newton_matrix.set(pc_dof, pc_dof, 1.0);
-
+      // ---- J_tt, with an identity on every non-trace row -------------------
       jacobian_matrix = 0.0;
+      assemble_jacobian_trace_interior_block(y_relevant);
+      assemble_jacobian_trace_boundary_block(t, y_relevant);
+      assemble_jacobian_trace_junction_block(y_relevant);
+      assemble_jacobian_trace_continuity_block();
+      jacobian_matrix.compress(VectorOperation::add);
 
-      // ── Step 3 ─ Build Newton RHS: b = −G ───────────────────────────────
-      // CHANGED: only fill RHS for trace rows. Pc rows get 0 -> identity row
-      //          gives delta[pc]=0, so Pc stays at its seeded value.
-      Vector<double> rhs(n_total_dofs);
-      for (types::global_dof_index i = n_cell_dofs; i < n_trace_end; ++i)
-        rhs[i] = -G[i];
+      linear_system_matrix = 0.0;
+      for (const auto i : trace_dofs_owned)
+        for (auto it = jacobian_matrix.begin(i); it != jacobian_matrix.end(i);
+             ++it)
+          linear_system_matrix.set(i, it->column(), it->value());
 
-      // ── Step 4 ─ Solve and update trace DOFs ─────────────────────────────
-      newton_solver.initialize(newton_matrix);
-      Vector<double> delta(n_total_dofs);
-      newton_solver.vmult(delta, rhs);
+      for (const auto i : cell_dofs_owned)
+        linear_system_matrix.set(i, i, 1.0);
+      for (const auto i : rcr_dofs_owned)
+        linear_system_matrix.set(i, i, 1.0);
+      linear_system_matrix.compress(VectorOperation::insert);
 
-      // CHANGED: only apply correction to trace block (Pc delta is 0 anyway).
-      for (types::global_dof_index i = n_cell_dofs; i < n_trace_end; ++i)
-        sol[i] += delta[i];
+      // ---- b = -G on the trace rows, zero elsewhere ------------------------
+      // The identity rows then return delta = 0 there, so the cell values and
+      // the seeded capacitor pressures are left untouched.
+      rhs = 0.0;
+      for (const auto i : trace_dofs_owned)
+        rhs(i) = -G(i);
+      rhs.compress(VectorOperation::insert);
+
+      // ---- solve and update ------------------------------------------------
+      {
+        SolverControl solver_control(1, 0.0);
+#ifdef USE_PETSC_LA
+        PETScWrappers::SparseDirectMUMPS newton_solver(solver_control);
+        newton_solver.solve(linear_system_matrix, delta, rhs);
+#else
+        TrilinosWrappers::SolverDirect newton_solver(solver_control);
+        newton_solver.solve(linear_system_matrix, delta, rhs);
+#endif
+      }
+
+      for (const auto i : trace_dofs_owned)
+        sol(i) += delta(i);
+      sol.compress(VectorOperation::add);
     }
 
-  // ── Step 5 ─ Final per-type diagnostic ────────────────────────────────────
-  {
-    Vector<double> F_final(n_total_dofs);
-    assemble_trace_interior_equations(sol, F_final);
-    assemble_trace_boundary_equations(t, sol, F_final);
-    assemble_trace_junction_equations(sol, F_final);
-    double g_int = 0.0, g_bnd = 0.0, g_jnc = 0.0;
-
-    std::set<std::pair<CellId, unsigned int>> visited;
-    for (const auto &cell : dof_handler.active_cell_iterators())
-      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-        {
-          const auto key = canonical_face_key(cell, f);
-          if (visited.count(key))
-            continue;
-          visited.insert(key);
-
-          const FaceTraceDof &td = face_dof_map.at(key);
-          const double        ra = std::abs(F_final[td.a_hat_dof]);
-          const double        ru = std::abs(F_final[td.u_hat_dof]);
-          const double        r  = std::max(ra, ru);
-
-          if (is_junction_face(cell->id(), f))
-            g_jnc = std::max(g_jnc, r);
-          else if (cell->face(f)->at_boundary())
-            g_bnd = std::max(g_bnd, r);
-          else
-            g_int = std::max(g_int, r);
-        }
-
-    std::cout << "  Final ||F_trace||_inf by type:\n"
-              << "    interior  = " << std::scientific << std::setprecision(4)
-              << g_int << "\n"
-              << "    boundary  = " << g_bnd << "\n"
-              << "    junction  = " << g_jnc << "\n"
-              << "==========================================\n\n";
-  }
+  jacobian_matrix      = 0.0;
+  linear_system_matrix = 0.0;
+  jacobian_matrix.compress(VectorOperation::insert);
+  linear_system_matrix.compress(VectorOperation::insert);
 }
 
 // ============================================================================
-// build_per_cell_mass
+// build_per_cell_mass_inv
 //
-// For every active cell K, compute both:
-//   per_cell_mass_    : forward M_K  — used in assemble_residual (M*ydot term)
-//                       and assemble_jacobian (alpha*M term)
-//   per_cell_mass_inv : M_K^{-1}    — used in computing consistent
-//                       initial solution_dot = M_K^{-1} * F_cell(y0)
+// For every locally owned cell K:
+//   per_cell_mass     : M_K, used for the M*ydot term of the residual and the
+//                       alpha*M term of the Jacobian
+//   per_cell_mass_inv : M_K^{-1}, diagnostic only
 //
-// IDA receives the true DAE residual F(t,y,ydot) = M*ydot - R(y) directly.
+// Indexed by cell->active_cell_index(): deal.II numbers the locally stored
+// active cells contiguously from zero, so the vectors are sized to the local
+// cell count and no CellId comparison happens in the residual inner loop.
 // ============================================================================
-
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::build_per_cell_mass_inv()
 {
   TimerOutput::Scope timer(computing_timer, "build_per_cell_mass_inv");
 
-  per_cell_mass_inv.clear();
+  const unsigned int n_local_cells = triangulation.n_active_cells();
+  per_cell_mass.assign(n_local_cells, FullMatrix<double>());
+  per_cell_mass_inv.assign(n_local_cells, FullMatrix<double>());
 
   const QGauss<dim>       quad(fe_degree + 1);
   FEValues<dim, spacedim> fev(*fe, quad, update_values | update_JxW_values);
@@ -863,38 +1371,58 @@ BloodFlowSystem<dim, spacedim>::build_per_cell_mass_inv()
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       fev.reinit(cell);
       FullMatrix<double> M(n_dofs, n_dofs);
 
-      // FESystem(FE_DGQ, 2) shape functions are component-specific:
-      // phi_i is nonzero only for its component, so M(i,j) = 0 whenever
-      // component(i)!= component(j).  We must skip cross-component pairs;
-      // otherwise M has zero rows/columns and gauss_jordan() aborts.
-
+      // FESystem(FE_DGQ, 2) shape functions are component specific: phi_i is
+      // nonzero only for its own component, so M(i,j) = 0 whenever
+      // component(i) != component(j).  Cross-component pairs are skipped;
+      // otherwise M would have zero rows and gauss_jordan() would abort.
+      // Only the cell components (0,1) carry a mass term, so the trace rows
+      // and columns of M stay exactly zero -- which is what makes alpha*M
+      // leave the trace rows algebraic.
       for (unsigned int q = 0; q < fev.n_quadrature_points; ++q)
         for (unsigned int i = 0; i < n_dofs; ++i)
           {
             const unsigned int ci = fe->system_to_component_index(i).first;
+            if (ci >= 2)
+              continue;
             for (unsigned int j = 0; j < n_dofs; ++j)
               {
                 const unsigned int cj = fe->system_to_component_index(j).first;
                 if (ci != cj)
-                  continue; // cross-component integral is identically zero
+                  continue;
                 M(i, j) +=
                   fev.shape_value(i, q) * fev.shape_value(j, q) * fev.JxW(q);
               }
           }
 
-      // Invert in place (small dense block-diagonal matrix)
-      per_cell_mass_[cell->id()] = M;
-      M.gauss_jordan();
-      per_cell_mass_inv[cell->id()] = std::move(M);
+      per_cell_mass[cell->active_cell_index()] = M;
+
+      // For the diagnostic inverse, put 1 on the trace diagonal so the dense
+      // inverse exists; that block is never applied.
+      FullMatrix<double> M_inv(M);
+      for (unsigned int i = 0; i < n_dofs; ++i)
+        if (fe->system_to_component_index(i).first >= 2)
+          M_inv(i, i) = 1.0;
+      M_inv.gauss_jordan();
+      per_cell_mass_inv[cell->active_cell_index()] = std::move(M_inv);
     }
 }
 
-// ---------- open_csv_files --------------------------------------------------
-// One CSV per vessel:  HDG_IDA_Vessel_<vid>.csv  (ascending vessel id).
-// Each file gets a row [time, P, Q, A, U] at the vessel's arc-length midpoint.
+// ============================================================================
+// open_csv_files
+//
+// One CSV per vessel, written at the vessel's arc-length midpoint.  The probe
+// cell is chosen by a global argmin over the distance to the midpoint: each
+// rank offers its best locally owned candidate and the rank holding the
+// overall winner opens the file.  Every vessel is therefore probed exactly
+// once, by whichever rank owns the middle of it, and no file is written by
+// two ranks.
+// ============================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::open_csv_files()
@@ -902,23 +1430,16 @@ BloodFlowSystem<dim, spacedim>::open_csv_files()
   const std::string dir =
     output_directory + (output_directory.empty() ? "" : "/");
 
-  // handles re-entry on a new refinement cycle
   close_csv_files();
-  csv_vessel_.clear();
-  probe_targets_.clear();
-
-  // 1. Distinct vessel ids present in the mesh. std::set => ascending order,
-  //    which gives ascending file numbering.
-  std::set<unsigned int> vessel_ids;
-  for (const auto &cell : dof_handler.active_cell_iterators())
-    vessel_ids.insert(cell->material_id());
+  csv_vessel.clear();
+  probe_targets.clear();
 
   const std::string hdr = "time_s,P_dynpcm2,Q_cm3ps,A_cm2,U_cmps\n";
 
-  // 2. For each vessel, locate the cell nearest its arc-length midpoint and
-  //   open that vessel's file.
-  for (const unsigned int vid : vessel_ids)
+  for (const auto &[vid, vpp] : vessel_map)
     {
+      (void)vpp;
+
       double     s_mid = 0.0;
       const auto it    = vessel_s_bounds.find(vid);
       if (it != vessel_s_bounds.end())
@@ -930,6 +1451,8 @@ BloodFlowSystem<dim, spacedim>::open_csv_files()
 
       for (const auto &cell : dof_handler.active_cell_iterators())
         {
+          if (!cell->is_locally_owned())
+            continue;
           if (cell->material_id() != vid)
             continue;
 
@@ -944,34 +1467,46 @@ BloodFlowSystem<dim, spacedim>::open_csv_files()
             }
         }
 
-      if (!found)
+      // Ties are broken by rank, so exactly one rank claims the vessel even
+      // if two of them report the same distance.
+      const auto winner =
+        Utilities::MPI::min_max_avg(best_dist, mpi_communicator);
+      const unsigned int winning_rank =
+        Utilities::MPI::min(found && best_dist <= winner.min ?
+                              this_mpi_process :
+                              numbers::invalid_unsigned_int,
+                            mpi_communicator);
+
+      if (winning_rank != this_mpi_process || !found)
         continue;
 
-      probe_targets_.emplace_back(vid, best_cell);
+      probe_targets.emplace_back(vid, best_cell);
 
-      std::ofstream &os = csv_vessel_[vid];
+      std::ofstream &os = csv_vessel[vid];
       os.open(dir + "HDG_IDA_Vessel_" + std::to_string(vid) + ".csv");
       os << hdr;
     }
 }
 
-// ---------- write_csv_row ---------------------------------------------------
-// Call at each output timestep after the solution is updated.
+// ============================================================================
+// write_csv_row
+// ============================================================================
 template <int dim, int spacedim>
 void
-BloodFlowSystem<dim, spacedim>::write_csv_row(const double          t,
-                                              const Vector<double> &sol)
+BloodFlowSystem<dim, spacedim>::write_csv_row(const double      t,
+                                              const VectorType &sol)
 {
   const unsigned int dofs_per_cell = fe->n_dofs_per_cell();
 
-  // Reference-cell midpoint (DGQ, dim==1 -> xi = 0.5).
+  // Reference-cell midpoint (DGQ, dim == 1 -> xi = 0.5).
   const Point<dim> xi_mid = (dim == 1) ? Point<dim>(0.5) : Point<dim>();
 
-  for (const auto &[vid, cell] : probe_targets_)
+  for (const auto &[vid, cell] : probe_targets)
     {
-      std::ofstream &os = csv_vessel_.at(vid);
+      std::ofstream &os = csv_vessel.at(vid);
 
-      // Evaluate (A, U) at the cell midpoint via the DG shape functions.
+      // The probe cell is locally owned, so every one of its DoFs is owned
+      // here and can be read straight out of the non-ghosted vector.
       std::vector<types::global_dof_index> ldofs(dofs_per_cell);
       cell->get_dof_indices(ldofs);
 
@@ -980,21 +1515,19 @@ BloodFlowSystem<dim, spacedim>::write_csv_row(const double          t,
         {
           const double       phi  = fe->shape_value(i, xi_mid);
           const unsigned int comp = fe->system_to_component_index(i).first;
-          if (comp == 0) // area
-            A_val += sol[ldofs[i]] * phi;
-          else // velocity
-            U_val += sol[ldofs[i]] * phi;
+          if (comp == 0)
+            A_val += sol(ldofs[i]) * phi;
+          else if (comp == 1)
+            U_val += sol(ldofs[i]) * phi;
         }
 
-      const double A_cm2  = A_val * 1.0e4; // cm^2
-      const double U_cmps = U_val * 1.0e2; // cmps
+      const double A_cm2  = A_val * 1.0e4;
+      const double U_cmps = U_val * 1.0e2;
 
-      // Pressure [Pa] -> [dyn/cm^2].
       const double P_Pa =
         compute_pressure_value(A_val, vid, compute_a_d_local(cell));
       const double P_dynpcm2 = P_Pa * 10.0;
 
-      // Flow rate Q = A*U [cm^3/s] = [ml/s]  (1 m^3/s = 1e6 ml/s).
       const double Q_cm3ps = A_val * U_val * 1.0e6;
 
       os << std::scientific << std::setprecision(8) << t << "," << P_dynpcm2
@@ -1003,15 +1536,18 @@ BloodFlowSystem<dim, spacedim>::write_csv_row(const double          t,
     }
 }
 
-// ---------- close_csv_files -------------------------------------------------
+// ============================================================================
+// close_csv_files
+// ============================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::close_csv_files()
 {
-  for (auto &kv : csv_vessel_)
+  for (auto &kv : csv_vessel)
     if (kv.second.is_open())
       kv.second.close();
 }
+
 // ============================================================================
 // HLL flux (residual)
 // ============================================================================
@@ -1056,7 +1592,8 @@ BloodFlowSystem<dim, spacedim>::hll_flux(const double       bn_L,
 }
 
 // ============================================================================
-// HLL flux Jacobian (linearised w.r.t. trial perturbations dA_L, dU_L, …)
+// HLL flux Jacobian (linearised w.r.t. trial perturbations dA_L,
+// dU_L, …)
 // ============================================================================
 template <int dim, int spacedim>
 std::array<double, 2>
@@ -1105,8 +1642,8 @@ BloodFlowSystem<dim, spacedim>::hll_flux_jac(const double       bn_L,
            (s_R * FUL_j - s_L * FUR_j + s_R * s_L * (dU_R - dU_L)) * inv}};
 }
 
-// HLL-HDG flux based on Paper "Hybridisable discontinuous Galerkin
-// formulation of compressible flows "
+// HLL-HDG flux based on Paper "Hybridisable discontinuous
+// Galerkin formulation of compressible flows "
 
 template <int dim, int spacedim>
 std::array<double, 2>
@@ -1121,7 +1658,8 @@ BloodFlowSystem<dim, spacedim>::hll_hdg_flux(const double bn_L,
                                              const double /*ad_L*/,
                                              const double ad_R) const
 {
-  // Stabilization from TRACE state only (eq. 37 of Vila-Perez et al.)
+  // Stabilization from TRACE state only (eq. 37 of Vila-Perez et
+  // al.)
   const double c_b    = compute_wave_speed(A_R, vid_R, ad_R);
   const double s_plus = std::max(0.0, U_R * bn_L + c_b); // s⁺ at trace
 
@@ -1251,37 +1789,25 @@ BloodFlowSystem<dim, spacedim>::lf_flux_jac(const double       bn_L,
            0.5 * (FUL_j + FUR_j) - 0.5 * alpha * (dU_R - dU_L)}};
 }
 
-// ============================================================================
-// assemble_cell_residuals
-//
-// For each cell K:
-//   R_A = \int_K [ F_A(A,U) · \gradφ ] dK
-//         − \Sigma_f  hat{F}_A(A,U ; A_hat,U_hat) [[φ]]  (trace from
-//         face_dof_map)
-//         + source
-//   R_U similarly, with viscous friction source term.
-//
-// FEValues::get_function_values internally indexes via
-// cell->get_dof_indices(), which only produces indices in [0, n_cell_dofs).
-// We must pass a vector of exactly size n_cell_dofs; the trace block of y is
-// never needed here.
-// ============================================================================
 template <int dim, int spacedim>
 void
-BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
-                                                        const Vector<double> &y,
-                                                        Vector<double>       &F)
+BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(
+  const double t,
+  const VectorType & /*y*/,
+  VectorType &F)
 {
   TimerOutput::Scope timer(computing_timer, "assemble_cell_residuals");
 
-  // Extract the cell sub-block once.  All FEValues::get_function_values calls
-  // below receive y_cell (size n_cell_dofs) — consistent with dof_handler.
-  Vector<double> y_cell(n_cell_dofs);
-  for (types::global_dof_index i = 0; i < n_cell_dofs; ++i)
-    y_cell[i] = y[i];
+  // FEValues and FEFaceValues read through the ghosted FE-range vector.  It
+  // is sized dof_handler.n_dofs(), which get_function_values() asserts, and it
+  // holds every entry a locally owned cell can ask for, including the ones on
+  // its ghost neighbours.
+  const VectorType &y_cell = y_fe_relevant;
 
   const FEValuesExtractors::Scalar area_extractor(0);
   const FEValuesExtractors::Scalar velocity_extractor(1);
+  const FEValuesExtractors::Scalar a_hat_extractor(2); // trace area
+  const FEValuesExtractors::Scalar u_hat_extractor(3); // trace velocity
 
   const QGauss<dim>     quad_cell(fe->tensor_degree() + 1);
   const QGauss<dim - 1> quad_face(fe->tensor_degree() + 1);
@@ -1300,6 +1826,9 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       const unsigned int vid    = cell->material_id();
       const unsigned int n_dofs = fe->n_dofs_per_cell();
       fev.reinit(cell);
@@ -1324,7 +1853,8 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
           const double U = U_h[q];
           const double P =
             compute_pressure_value(A, vid, compute_a_d_local(cell));
-          // const double              P = compute_pressure_value(A, vid);
+          // const double              P =
+          // compute_pressure_value(A, vid);
           const Tensor<1, spacedim> b = compute_directional_vector(cell);
 
           const double rhs_A =
@@ -1365,35 +1895,37 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
           const double ad_face = compute_a_d_at_face(cell, f);
           const auto  &normals = fef.get_normal_vectors();
           const auto  &JxW     = fef.get_JxW_values();
-          // if (is_junction_face(cell->id(), f) && cell->material_id() == 0)
-          //   {
-          //     double A_h = 0, U_h = 0;
-          //     get_face_trace(y, cell, f, A_h, U_h);
-          //     std::cout << "JUNCTION FACE cell=" << cell->id() << " f=" << f
-          //               << " vid=" << cell->material_id() << " A_hat=" << A_h
-          //               << " U_hat=" << U_h << "\n";
-          //   }
+
           // Interior cell values at the face quadrature point
           std::vector<double> Ah_q(fef.n_quadrature_points);
           std::vector<double> Uh_q(fef.n_quadrature_points);
           fef[area_extractor].get_function_values(y_cell, Ah_q);
           fef[velocity_extractor].get_function_values(y_cell, Uh_q);
 
-          // Global face-trace values (read directly from trace block of y)
-          double A_hat = 0.0, U_hat = 0.0;
-          get_face_trace(y, cell, f, A_hat, U_hat);
-          A_hat = std::max(A_hat, 1e-10);
+          // Face-trace values: this cell's OWN (A_hat, U_hat) on
+          // face f, read with the same extractor idiom as the
+          // cell values.  For boundary faces and K>=3 junction
+          // half-faces this DOF *is* the unique/per-vessel trace;
+          // on an ordinary interior (or 2-way) face it is tied to
+          // the canonical side by the continuity rows, so the
+          // converged value is identical to the canonical one.
+          std::vector<double> Ahat_q(fef.n_quadrature_points);
+          std::vector<double> Uhat_q(fef.n_quadrature_points);
+          fef[a_hat_extractor].get_function_values(y_cell, Ahat_q);
+          fef[u_hat_extractor].get_function_values(y_cell, Uhat_q);
 
           for (unsigned int q = 0; q < fef.n_quadrature_points; ++q)
             {
-              const double A_in = std::max(Ah_q[q], 1e-10);
-              const double U_in = Uh_q[q];
+              const double A_in  = std::max(Ah_q[q], 1e-10);
+              const double U_in  = Uh_q[q];
+              const double A_hat = std::max(Ahat_q[q], 1e-10);
+              const double U_hat = Uhat_q[q];
               const double bn =
                 compute_tangent_normal_product(cell, normals[q]);
 
               // numerical_flux designed for left/right states.
-              // In current implementation there is no physical neighbour cell
-              // on the other side so we are ;
+              // In current implementation there is no physical
+              // neighbour cell on the other side so we are ;
 
               const auto [FA, FU] = numerical_flux(
                 bn, bn, A_in, U_in, A_hat, U_hat, vid, vid, ad_local, ad_face);
@@ -1402,6 +1934,9 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
                 {
                   const unsigned int comp =
                     fe->system_to_component_index(i).first;
+                  if (comp >= 2)
+                    continue; // trace components carry no cell
+                              // flux
                   cell_rhs(i) -=
                     (comp == 0 ? FA : FU) * fef.shape_value(i, q) * JxW[q];
                 }
@@ -1410,66 +1945,66 @@ BloodFlowSystem<dim, spacedim>::assemble_cell_residuals(const double          t,
 
       // ---- Scatter into global F
       // -------------------------------------------
+      // Every DoF of this FESystem is discontinuous, so all of `ldofs`
+      // belongs to this cell alone and is owned by this rank: no other rank
+      // contributes to these rows.
       for (unsigned int i = 0; i < n_dofs; ++i)
-        F[ldofs[i]] += cell_rhs(i);
+        F(ldofs[i]) += cell_rhs(i);
     }
 }
-
-// ============================================================================
-// assemble_trace_interior_equations
-//
-// For each unique interior (non-junction) face shared by cells L and R,
-// enforce conservation of numerical flux:
-//
-//   Fhat_L(W_L, What) + Fhat_R(W_R, What) = 0
-//
-// where
-//   R_A = FA_L + Fa_R
-//   R_U = FU_L + FU_R
-// and W_L, W_R are the interior states at the face from the left and right
-// cells, respectively, and W_hat is the trace state at the face (from
-// face_dof_map).
-// ============================================================================
 
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::assemble_trace_interior_equations(
-  const Vector<double> &y,
-  Vector<double>       &F)
+  const VectorType &y,
+  VectorType       &F)
 {
   TimerOutput::Scope timer(computing_timer,
                            "assemble_trace_interior_equations");
 
-  // Cell-block sub-vector for FEFaceValues (size must equal
-  // dof_handler.n_dofs())
-  Vector<double> y_cell(n_cell_dofs);
-  for (types::global_dof_index i = 0; i < n_cell_dofs; ++i)
-    y_cell[i] = y[i];
+  // FEValues and FEFaceValues read through the ghosted FE-range vector.  It
+  // is sized dof_handler.n_dofs(), which get_function_values() asserts, and it
+  // holds every entry a locally owned cell can ask for, including the ones on
+  // its ghost neighbours.
+  const VectorType &y_cell = y_fe_relevant;
 
   const FEValuesExtractors::Scalar area_extractor(0);
   const FEValuesExtractors::Scalar velocity_extractor(1);
+  const FEValuesExtractors::Scalar a_hat_extractor(2); // trace area
+  const FEValuesExtractors::Scalar u_hat_extractor(3); // trace velocity
 
   const QGauss<dim - 1> quad_face(1); // each 1-D face is a single 0-D point
   FEFaceValues<dim, spacedim> fef(*fe,
                                   quad_face,
                                   update_values | update_normal_vectors);
 
-  // Avoid double assembly of the same face from left and right cells
+  // Avoid double assembly of the same face from the left and the right
+  // cell.  The set is per rank, which is enough: the ownership guard below
+  // lets exactly one rank write a given face's rows.
   std::set<std::pair<CellId, unsigned int>> processed;
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
         {
           if (cell->face(f)->at_boundary())
             continue;
           if (is_junction_face(cell->id(), f))
             continue;
-
           const auto key = canonical_face_key(cell, f);
           if (processed.count(key))
             continue;
           processed.insert(key);
+
+          // A face's rows live on its canonical side.  If that side sits on
+          // another rank, that rank writes them and this one skips the face.
+          const auto trace_it = face_dof_map.find(key);
+          Assert(trace_it != face_dof_map.end(), ExcInternalError());
+          if (!locally_owned_dofs.is_element(trace_it->second.a_hat_dof))
+            continue;
 
           const auto        &nb   = cell->neighbor(f);
           const unsigned int nb_f = cell->neighbor_of_neighbor(f);
@@ -1506,67 +2041,50 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_interior_equations(
           get_face_trace(y, cell, f, A_hat, U_hat);
           A_hat = std::max(A_hat, 1e-10);
 
-          // Left HDG type flux residuals (face integrals with interior state
-          // from left cell) numerical_flux is designed for left/right states.
-          // The trace acts as the exterior state, therefore use
-          // opposite orientation on the trace side.
+          // Left HDG type flux residuals (face integrals with
+          // interior state from left cell) numerical_flux is
+          // designed for left/right states. The trace acts as the
+          // exterior state, therefore use opposite orientation on
+          // the trace side.
           const auto [FA_L, FU_L] = numerical_flux(
             bn_L, bn_L, A_L, U_L, A_hat, U_hat, vid_L, vid_R, ad_L, ad_face);
 
-          // Right HDG type flux residuals (face integrals with interior state
-          // from right cell)
+          // Right HDG type flux residuals (face integrals with
+          // interior state from right cell)
           const auto [FA_R, FU_R] = numerical_flux(
             bn_R, bn_R, A_R, U_R, A_hat, U_hat, vid_R, vid_L, ad_R, ad_face);
 
           // Trace dofs
-          const FaceTraceDof &td = face_dof_map.at(key);
+          const FaceTraceDof &td = trace_it->second;
 
           // HDG type transmission equations
           // sum of left and right fluxes must be zero
-          F[td.a_hat_dof] += FA_L + FA_R;
-          F[td.u_hat_dof] += FU_L + FU_R;
+          F(td.a_hat_dof) += FA_L + FA_R;
+          F(td.u_hat_dof) += FU_L + FU_R;
         }
     }
 }
 
-// ============================================================================
-// assemble_trace_boundary_equations
-//
-// Each boundary face (non-junction) gets two residual equations for its
-// trace pair (A_hat, U_hat):
-//
-//   bid == 0  (inflow):
-//     R_a = A_hat * U_hat − Q_in(t) = 0          (prescribed volumetric flow)
-//     R_u = [U_hat − 4(c_hat − c0)] − W2_int = 0 (outgoing Riemann compat.)
-//           W2_int = U_int − 4(c_int − c0)
-//
-//   bid != 0 + RCR:
-//     R_a = P(A_hat) − [R1 * A_hat*u_hat + Pc] = 0         (Windkessel
-//     pressure BC) R_u = [U_hat + 4(c_hat − c0)] − W1_int = 0 (incoming
-//     Riemann compat.)
-//           W1_int = U_int + 4(c_int − c0)
-//
-//   bid != 0 + Reflection:
-//     R_a = [U_hat + 4(c_hat − c0)] − W1_int = 0 (forward compat.)
-//     R_u = [U_hat − 4(c_hat − c0)] − W2_tgt = 0 (backward: −Rt * W1_int)
-// ============================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::assemble_trace_boundary_equations(
-  const double          t,
-  const Vector<double> &y,
-  Vector<double>       &F)
+  const double      t,
+  const VectorType &y,
+  VectorType       &F)
 {
   TimerOutput::Scope timer(computing_timer,
                            "assemble_trace_boundary_equations");
 
-  // Cell-block sub-vector for FEFaceValues
-  Vector<double> y_cell(n_cell_dofs);
-  for (types::global_dof_index i = 0; i < n_cell_dofs; ++i)
-    y_cell[i] = y[i];
+  // FEValues and FEFaceValues read through the ghosted FE-range vector.  It
+  // is sized dof_handler.n_dofs(), which get_function_values() asserts, and it
+  // holds every entry a locally owned cell can ask for, including the ones on
+  // its ghost neighbours.
+  const VectorType &y_cell = y_fe_relevant;
 
   const FEValuesExtractors::Scalar area_extractor(0);
   const FEValuesExtractors::Scalar velocity_extractor(1);
+  const FEValuesExtractors::Scalar a_hat_extractor(2); // trace area
+  const FEValuesExtractors::Scalar u_hat_extractor(3); // trace velocity
 
   const QGauss<dim - 1>       quad_face(1);
   FEFaceValues<dim, spacedim> fef(*fe, quad_face, update_values);
@@ -1575,6 +2093,9 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_boundary_equations(
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
         {
           if (!cell->face(f)->at_boundary())
@@ -1623,11 +2144,11 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_boundary_equations(
               const double Q   = A_hat_cur * U_hat_cur;
               if (rcr.C > 0.0)
                 {
-                  // const double Pc = terminal_Pc_storage.at(bid);
-                  // res_A =
-                  //   compute_pressure_value(A_hat, vid, a_d_local) - (rcr.R1 *
-                  //   Q + Pc);
-                  const double Pc = y[rcr_pc_dof.at(bid)];
+                  // const double Pc =
+                  // terminal_Pc_storage.at(bid); res_A =
+                  //   compute_pressure_value(A_hat, vid,
+                  //   a_d_local) - (rcr.R1 * Q + Pc);
+                  const double Pc = y(rcr_pc_dof.at(bid));
                   res_A = compute_pressure_value(A_hat, vid, a_d_local) -
                           (rcr.R1 * Q + Pc);
                 }
@@ -1649,89 +2170,95 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_boundary_equations(
               res_U = (U_hat_cur - 4.0 * (c_hat - c0)) - W2_tgt;
             }
 
+          // A boundary face has exactly one incident cell, so its rows are
+          // owned wherever that cell is owned.  Writing with `+=` into a
+          // zeroed vector gives the same value as `=` and keeps the whole
+          // residual on add semantics for a single compress().
           const FaceTraceDof &td = face_dof_map.at(canonical_face_key(cell, f));
-          F[td.a_hat_dof]        = res_A;
-          F[td.u_hat_dof]        = res_U;
+          Assert(locally_owned_dofs.is_element(td.a_hat_dof),
+                 ExcInternalError());
+          F(td.a_hat_dof) += res_A;
+          F(td.u_hat_dof) += res_U;
         }
     }
 }
 
-// ============================================================================
-// assemble_rcr_capacitance_equations
-// For each RCR outlet, enforce the capacitance relation:
-//   dP/dt = (P - R2*Q - P_out) / (R1*C)
-// where P = P(A_hat) is the pressure at the outlet face (from trace state), Q =
-// A_hat * U_hat
-// ============================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::assemble_rcr_capacitor_equations(
-  const Vector<double> &y,
-  const Vector<double> &ydot,
-  Vector<double>       &F)
+  const VectorType &y,
+  const VectorType &ydot,
+  VectorType       &F)
 {
   if (rcr_pc_dof.empty())
     return;
 
+  // ydot is IDA's raw vector: unlike y (ghosted into y_relevant by the
+  // caller), it only holds entries this rank owns.  Pc row ownership is now
+  // assigned to a single designated rank for PETSc's sake (see
+  // build_rcr_dof_map), which in general differs from the rank that owns
+  // the terminal's cell -- the rank that needs Pc_dot here to write the
+  // residual is often not the one that owns it.  n_rcr_dofs is tiny, so a
+  // manual all-reduce of that short array is far cheaper than standing up a
+  // full ghosted copy of ydot just for this.
+  const types::global_dof_index first_pc = n_total_dofs - n_rcr_dofs;
+  std::vector<double>           pc_dot_local(n_rcr_dofs, 0.0);
+  for (const auto &[bid, pc_dof] : rcr_pc_dof)
+    if (locally_owned_dofs.is_element(pc_dof))
+      pc_dot_local[pc_dof - first_pc] = ydot(pc_dof);
+
+  // Utilities::MPI::sum's std::vector<double> overload isn't explicitly
+  // instantiated in every deal.II build (it's only compiled for a fixed set
+  // of types), so call MPI_Allreduce directly instead -- it's always
+  // available once <deal.II/base/mpi.h> is included.
+  std::vector<double> pc_dot_global(n_rcr_dofs, 0.0);
+  if (n_rcr_dofs > 0)
+    MPI_Allreduce(pc_dot_local.data(),
+                  pc_dot_global.data(),
+                  static_cast<int>(n_rcr_dofs),
+                  MPI_DOUBLE,
+                  MPI_SUM,
+                  mpi_communicator);
+
   for (const auto &cell : dof_handler.active_cell_iterators())
-    for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-      {
-        if (!cell->face(f)->at_boundary())
-          continue;
-        if (is_junction_face(cell->id(), f))
-          continue;
-        const auto pit = rcr_pc_dof.find(cell->face(f)->boundary_id());
-        if (pit == rcr_pc_dof.end())
-          continue;
+    {
+      if (!cell->is_locally_owned())
+        continue;
 
-        const types::global_dof_index pc_dof = pit->second;
-        const auto &rcr = rcr_map.at(cell->face(f)->boundary_id());
+      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        {
+          if (!cell->face(f)->at_boundary())
+            continue;
+          if (is_junction_face(cell->id(), f))
+            continue;
+          const auto pit = rcr_pc_dof.find(cell->face(f)->boundary_id());
+          if (pit == rcr_pc_dof.end())
+            continue;
 
-        double A_hat = 0.0, U_hat = 0.0;
-        get_face_trace(y, cell, f, A_hat, U_hat);
-        const double Q      = A_hat * U_hat;
-        const double Pc     = y[pc_dof];
-        const double Pc_dot = ydot[pc_dof];
+          const types::global_dof_index pc_dof = pit->second;
+          const auto &rcr = rcr_map.at(cell->face(f)->boundary_id());
 
-        // C*Ṗc - Q + (Pc - P_out)/R2 = 0
-        F[pc_dof] = rcr.C * Pc_dot - Q + (Pc - rcr.P_out) / rcr.R2;
-      }
+          double A_hat = 0.0, U_hat = 0.0;
+          get_face_trace(y, cell, f, A_hat, U_hat);
+          const double Q      = A_hat * U_hat;
+          const double Pc     = y(pc_dof);
+          const double Pc_dot = pc_dot_global[pc_dof - first_pc];
+
+          // C*Ṗc - Q + (Pc - P_out)/R2 = 0
+          // Written from whichever rank owns the terminal's cell; the row
+          // itself may be owned by a *different* rank for PETSc's
+          // partitioning, and the off-owner add is routed there by the
+          // caller's compress(VectorOperation::add).
+          F(pc_dof) += rcr.C * Pc_dot - Q + (Pc - rcr.P_out) / rcr.R2;
+        }
+    }
 }
 
-// ============================================================================
-// assemble_trace_junction_equations
-//
-// At a K-way junction the 2K trace unknowns {A_hat_i, U_hat_i} for
-// i = 0 … K−1 must satisfy: ( here K>=2 , K=2 , 2 way junction otherwise K>2
-// multi-way junction)
-//
-//   (a) Mass conservation  (1 equation):
-//         sum_i [ s_i * A_hat_i * U_hat_i ] = 0
-//
-//   (b) Total-head continuity  (K−1 equations):
-//         H_0 − H_i = 0,   H_i = U_hat_i^2/2 + P(A_hat_i)/ρ
-//
-//   (c) Riemann compatibility  (K equations):
-//         U_hat_i + s_i * 4(c_hat_i − c0_i) − W_i = 0
-//         where  W_i = U_int_i + s_i * 4(c_int_i − c0_i)
-//                is the outgoing Riemann invariant from cell i's interior.
-//
-// Total: 1 + (K−1) + K = 2K equations.
-//
-// Row assignment to avoid collision:
-//   a_idx[0]          -> (a) mass conservation
-//   u_idx[0..K−2]     -> (b) total-head continuity for vessels 1..K−1
-//   u_idx[K−1]        -> (c) Riemann compat. for vessel 0
-//   a_idx[1..K−1]     -> (c) Riemann compat. for vessels 1..K−1
-//
-// FEFaceValues::get_function_values uses y_cell (size n_cell_dofs).
-// Trace values are read directly from the trace block of y.
-// ============================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
-  const Vector<double> &y,
-  Vector<double>       &F)
+  const VectorType &y,
+  VectorType       &F)
 {
   TimerOutput::Scope timer(computing_timer,
                            "assemble_trace_junction_equations");
@@ -1739,13 +2266,16 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
   if (junctions.empty())
     return;
 
-  // Cell-block sub-vector for FEFaceValues
-  Vector<double> y_cell(n_cell_dofs);
-  for (types::global_dof_index i = 0; i < n_cell_dofs; ++i)
-    y_cell[i] = y[i];
+  // FEValues and FEFaceValues read through the ghosted FE-range vector.  It
+  // is sized dof_handler.n_dofs(), which get_function_values() asserts, and it
+  // holds every entry a locally owned cell can ask for, including the ones on
+  // its ghost neighbours.
+  const VectorType &y_cell = y_fe_relevant;
 
   const FEValuesExtractors::Scalar area_extractor(0);
   const FEValuesExtractors::Scalar velocity_extractor(1);
+  const FEValuesExtractors::Scalar a_hat_extractor(2); // trace area
+  const FEValuesExtractors::Scalar u_hat_extractor(3); // trace velocity
 
   const QGauss<dim - 1>       quad_face(1);
   FEFaceValues<dim, spacedim> fef(*fe, quad_face, update_values);
@@ -1776,60 +2306,102 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
 
           A_int[i] = std::max(Av[0], A_min);
           U_int[i] = Uv[0];
-          s[i]     = hf.orientation; // +1 if junction is at face 1 (right end)
+          s[i]     = hf.orientation; // +1 if junction is at face 1
+                                     // (right end)
           const double a_d_face = compute_a_d_at_face(hf.cell, hf.face_no);
           c0[i]                 = compute_wave_speed(a_d_face, vid, a_d_face);
 
-          // Outgoing Riemann invariant from cell i toward the junction
+          // Outgoing Riemann invariant from cell i toward the
+          // junction
           const double c_i = compute_wave_speed(A_int[i], vid, a_d_face);
           W[i] = U_int[i] + static_cast<double>(s[i]) * 4.0 * (c_i - c0[i]);
 
-          // Trace DOF indices and current trace values (from trace block of
-          // y)
-          const FaceTraceDof &td =
-            face_dof_map.at(canonical_face_key(hf.cell, hf.face_no));
-          a_idx[i] = td.a_hat_dof;
-          u_idx[i] = td.u_hat_dof;
+          // Trace DOF indices and current trace values (from
+          // trace block of y)
+          // const FaceTraceDof &td =
+          //   face_dof_map.at(canonical_face_key(hf.cell, hf.face_no));
+          // std::cout << "Rank " << this_mpi_process
+          //           << " owned=" << hf.cell->is_locally_owned()
+          //           << " ghost=" << hf.cell->is_ghost()
+          //           << " artificial=" << hf.cell->is_artificial() <<
+          //           std::endl;
+          // const auto key = canonical_face_key(hf.cell, hf.face_no);
 
-          A_hat[i] = std::max(y[a_idx[i]], A_min);
-          U_hat[i] = y[u_idx[i]];
+          // auto it = face_dof_map.find(key);
+
+          // if (it == face_dof_map.end())
+          //   {
+          //     std::cout << "Rank " << this_mpi_process << " missing face key
+          //     "
+          //               << key.first << " " << key.second << std::endl;
+
+          //     std::abort();
+          //   }
+
+          // const FaceTraceDof &td = it->second;
+
+          // a_idx[i] = td.a_hat_dof;
+          // u_idx[i] = td.u_hat_dof;
+          std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
+          hf.cell->get_dof_indices(ldofs);
+
+          const auto [a_hat_dof, u_hat_dof] =
+            face_trace_dofs(ldofs, hf.face_no);
+
+          a_idx[i] = a_hat_dof;
+          u_idx[i] = u_hat_dof;
+
+          A_hat[i] = std::max(y(a_idx[i]), A_min);
+          U_hat[i] = y(u_idx[i]);
           c_hat[i] = compute_wave_speed(A_hat[i], vid, a_d_face);
         }
 
-      // (a) Mass conservation -> row a_idx[0]
-      {
-        double mass_res = 0.0;
-        for (unsigned int i = 0; i < K; ++i)
-          mass_res += static_cast<double>(s[i]) * A_hat[i] * U_hat[i];
-        F[a_idx[0]] = mass_res;
-      }
+      // (a) Mass conservation -> row a_idx[0].
+      //
+      // The 2K rows of a junction are spread over its K half-faces, so a
+      // junction cut by a subdomain boundary has its rows split between the
+      // two ranks.  Each rank writes only the rows it owns and reads the
+      // other vessels' states from its ghost layer, which is complete here
+      // because the layer is vertex-adjacent.  No reduction closes these
+      // equations.
+      if (locally_owned_dofs.is_element(a_idx[0]))
+        {
+          double mass_res = 0.0;
+          for (unsigned int i = 0; i < K; ++i)
+            mass_res += static_cast<double>(s[i]) * A_hat[i] * U_hat[i];
+          F(a_idx[0]) += mass_res;
+        }
 
-      // (b) Total-head continuity: H_0 − H_i = 0 -> rows u_idx[0..K−2]
+      // (b) Total-head continuity: H_0 − H_i = 0 -> rows
+      // u_idx[0..K−2]
       {
         const double a_d0 =
           compute_a_d_at_face(J.half_faces[0].cell, J.half_faces[0].face_no);
         const double H0 =
-          // 0.5 * U_hat[0] * U_hat[0] +
+          0.5 * gamma * U_hat[0] * U_hat[0] +
           compute_pressure_value(A_hat[0],
                                  J.half_faces[0].cell->material_id(),
                                  a_d0) /
-          rho;
+            rho;
 
         for (unsigned int i = 1; i < K; ++i)
           {
             const double a_di = compute_a_d_at_face(J.half_faces[i].cell,
                                                     J.half_faces[i].face_no);
             const double Hi =
-              //    0.5 * U_hat[i] * U_hat[i] +
+              0.5 * gamma * U_hat[i] * U_hat[i] +
               compute_pressure_value(A_hat[i],
                                      J.half_faces[i].cell->material_id(),
                                      a_di) /
-              rho;
-            F[u_idx[i - 1]] = H0 - Hi;
+                rho;
+
+            if (locally_owned_dofs.is_element(u_idx[i - 1]))
+              F(u_idx[i - 1]) += H0 - Hi;
           }
       }
 
-      // (c) Riemann compatibility: U_hat_i + s_i*4(c_hat_i−c0_i) − W_i = 0
+      // (c) Riemann compatibility: U_hat_i + s_i*4(c_hat_i−c0_i)
+      // − W_i = 0
       //     vessel 0 -> row u_idx[K−1]
       //     vessel i>=1 -> row a_idx[i]
       for (unsigned int i = 0; i < K; ++i)
@@ -1841,93 +2413,205 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_junction_equations(
           const types::global_dof_index row =
             (i == 0) ? u_idx[K - 1] : a_idx[i];
 
-          F[row] = compatibility_res;
+          if (locally_owned_dofs.is_element(row))
+            F(row) += compatibility_res;
         }
+    }
+}
+
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::assemble_trace_continuity_equations(
+  const VectorType &y,
+  VectorType       &F)
+{
+  TimerOutput::Scope timer(computing_timer,
+                           "assemble_trace_continuity_equations");
+  for (const auto &p : trace_continuity_pairs)
+    {
+      // The duplicate side is always a locally owned cell's own pair, so
+      // these rows are owned by construction; the canonical values are read
+      // from the ghosted vector and may live on another rank.
+      Assert(locally_owned_dofs.is_element(p.a_dup), ExcInternalError());
+      F(p.a_dup) += y(p.a_dup) - y(p.a_canon);
+      F(p.u_dup) += y(p.u_dup) - y(p.u_canon);
+    }
+}
+
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_continuity_block()
+{
+  // Owned by construction: the duplicate side is a locally owned cell's own
+  // pair.  The canonical column may belong to another rank, which is fine --
+  // only rows are partitioned.
+  for (const auto &p : trace_continuity_pairs)
+    {
+      jacobian_matrix.add(p.a_dup, p.a_dup, 1.0);
+      jacobian_matrix.add(p.a_dup, p.a_canon, -1.0);
+      jacobian_matrix.add(p.u_dup, p.u_dup, 1.0);
+      jacobian_matrix.add(p.u_dup, p.u_canon, -1.0);
     }
 }
 
 // ============================================================================
 // assemble_residual
 //
-// ARKode calls this to evaluate  f(t, y)  where the system is
-//   dy/dt = f(t, y)   with M_ARKode = I.
-//
-// For cell DOFs: f_cell = M_K^-1 * F_cell(y)  (apply per-cell inverse mass)
-// For trace DOFs: f_trace = F_trace(y)         (algebraic — returned as-is)
-//
-// ARKode drives  dy/dt = f(t,y) and enforces  F_trace = 0 as a stiff
-// algebraic constraint through its implicit solver.
+// IDA's F(t, y, ydot) = 0.  Reads go through the ghosted vectors filled by
+// update_ghosted_vectors(); writes go to the locally owned `residual` and are
+// closed by a single compress(add).  Every routine called here uses add
+// semantics, so the two are never mixed in one compress.
 // ============================================================================
 template <int dim, int spacedim>
 void
-BloodFlowSystem<dim, spacedim>::assemble_residual(const double          t,
-                                                  const Vector<double> &y,
-                                                  const Vector<double> &ydot,
-                                                  Vector<double> &residual)
+BloodFlowSystem<dim, spacedim>::assemble_residual(const double      t,
+                                                  const VectorType &y,
+                                                  const VectorType &ydot,
+                                                  VectorType       &residual)
 {
   TimerOutput::Scope timer(computing_timer, "assemble_residual");
-  deallog.push("assemble_residual");
-  deallog << "t=" << t << std::endl;
-  AssertDimension(y.size(), n_total_dofs);
-  AssertDimension(ydot.size(), n_total_dofs);
-  residual.reinit(n_total_dofs);
+  if (verbosity > 1)
+    {
+      deallog.push("assemble_residual");
+      deallog << "t=" << t << std::endl;
+    }
 
-  // ---- Assemble raw residuals for all DOFs --------------------------------
-  assemble_cell_residuals(t, y, residual);
-  assemble_trace_interior_equations(y, residual);
-  assemble_trace_boundary_equations(t, y, residual);
-  assemble_trace_junction_equations(y, residual);
-  // ---- Apply M_K^-1 to cell rows ------------------------------------------
-  // The cell block of F currently holds  F_cell(y).
+  update_ghosted_vectors(y);
+
+  // ---- raw residuals R(y) -------------------------------------------------
+  residual_F = 0.0;
+  assemble_cell_residuals(t, y_relevant, residual_F);
+  assemble_trace_interior_equations(y_relevant, residual_F);
+  assemble_trace_boundary_equations(t, y_relevant, residual_F);
+  assemble_trace_junction_equations(y_relevant, residual_F);
+  assemble_trace_continuity_equations(y_relevant, residual_F);
+  residual_F.compress(VectorOperation::add);
+
+  // ---- residual = M_K * ydot - R, uniformly over the FE range -------------
+  // per_cell_mass has an exactly zero block on the trace components (2,3), so
+  // this single formula produces the right thing for both kinds of row:
+  //   cell rows  (differential):  M ydot - R_cell
+  //   trace rows (algebraic)   :  0      - R_trace  =  -R_trace
+  // Every FE DoF, trace ones included, belongs to exactly one cell, and that
+  // cell is locally owned, so each row is written by exactly one rank once.
+  residual = 0.0;
+
   const unsigned int n_dofs = fe->n_dofs_per_cell();
   Vector<double>     local_F(n_dofs), local_Mydot(n_dofs), local_res(n_dofs);
+  std::vector<types::global_dof_index> ldofs(n_dofs);
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
-      std::vector<types::global_dof_index> ldofs(n_dofs);
+      if (!cell->is_locally_owned())
+        continue;
+
       cell->get_dof_indices(ldofs);
 
       for (unsigned int i = 0; i < n_dofs; ++i)
         {
-          local_F(i)     = residual[ldofs[i]]; // F_cell
-          local_Mydot(i) = ydot[ldofs[i]];
+          local_F(i)     = residual_F(ldofs[i]);
+          local_Mydot(i) = ydot(ldofs[i]);
         }
-      per_cell_mass_.at(cell->id()).vmult(local_res, local_Mydot); // M_k*ydot
+
+      per_cell_mass[cell->active_cell_index()].vmult(local_res, local_Mydot);
+
       for (unsigned int i = 0; i < n_dofs; ++i)
-        {
-          residual[ldofs[i]] = local_res(i) - local_F(i); // M ydot - R_cell
-        }
+        residual(ldofs[i]) += local_res(i) - local_F(i);
     }
-  for (types::global_dof_index i = n_cell_dofs; i < n_trace_end; ++i)
-    {
-      residual[i] = -residual[i]; // algebraic constraint: F_trace = 0 ->
-                                  // residual = -F_trace
-    }
-  // RCR capacitor rows: differential, already in M*ydot - R form
-  assemble_rcr_capacitor_equations(y, ydot, residual);
-  deallog.pop();
+
+  // RCR capacitor rows: differential, written directly in M*ydot - R form.
+  assemble_rcr_capacitor_equations(y_relevant, ydot, residual);
+
+  residual.compress(VectorOperation::add);
+  if (verbosity > 1)
+    deallog.pop();
 }
 
 // ============================================================================
-// assemble_jacobian_cell_block
+// assemble_jacobian
 //
-// Differentiates the cell residuals w.r.t. cell DOFs (block 1,1) and
-// w.r.t. trace DOFs (block 1,2).
+// J_IDA = dF/dy + alpha * dF/dydot = -dR/dy + alpha * M.
+//
+// The blocks are added first and compressed once; only then is the matrix
+// scaled and the mass term added, because *= and the ghost exchange of add()
+// both need the matrix in a compressed state.
 // ============================================================================
 template <int dim, int spacedim>
 void
+BloodFlowSystem<dim, spacedim>::assemble_jacobian(const double      t,
+                                                  const VectorType &y,
+                                                  const VectorType & /*ydot*/,
+                                                  const double alpha)
+{
+  TimerOutput::Scope timer(computing_timer, "assemble_jacobian");
+  if (verbosity > 1)
+    deallog.push("assemble_jacobian");
+  deallog << "t=" << t << std::endl;
+
+  update_ghosted_vectors(y);
+
+  jacobian_matrix = 0.0;
+
+  // ---- raw dR/dy ----------------------------------------------------------
+  assemble_jacobian_cell_block(t, y_relevant);
+  assemble_jacobian_trace_interior_block(y_relevant);
+  assemble_jacobian_trace_boundary_block(t, y_relevant);
+  assemble_jacobian_trace_junction_block(y_relevant);
+  assemble_jacobian_trace_continuity_block();
+  assemble_jacobian_rcr_capacitor_block(y_relevant);
+  jacobian_matrix.compress(VectorOperation::add);
+
+  // ---- negate: F = M*ydot - R_cell (cell) and F = -R_trace (trace), so
+  //      dF/dy = -dR/dy for both blocks.
+  jacobian_matrix *= -1.0;
+
+  // ---- add alpha*M on the cell block --------------------------------------
+  // M is M_K on the cell rows and exactly zero on the trace rows, which is
+  // what keeps the trace rows algebraic.
+  const unsigned int                   n_dofs = fe->n_dofs_per_cell();
+  std::vector<types::global_dof_index> ldofs(n_dofs);
+
+  for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+      if (!cell->is_locally_owned())
+        continue;
+
+      cell->get_dof_indices(ldofs);
+      const FullMatrix<double> &M_K = per_cell_mass[cell->active_cell_index()];
+
+      for (unsigned int i = 0; i < n_dofs; ++i)
+        for (unsigned int j = 0; j < n_dofs; ++j)
+          jacobian_matrix.add(ldofs[i], ldofs[j], alpha * M_K(i, j));
+    }
+
+  // alpha * C on the capacitor diagonal, on the owning rank only.
+  for (const auto &[bid, pc_dof] : rcr_pc_dof)
+    if (locally_owned_dofs.is_element(pc_dof))
+      jacobian_matrix.add(pc_dof, pc_dof, alpha * rcr_map.at(bid).C);
+
+  jacobian_matrix.compress(VectorOperation::add);
+  if (verbosity > 1)
+    deallog.pop();
+}
+
+template <int dim, int spacedim>
+void
 BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
-  const double          t,
-  const Vector<double> &y)
+  const double t,
+  const VectorType & /*y*/)
 {
   TimerOutput::Scope timer(computing_timer, "assemble_jacobian_cell_block");
 
-  Vector<double> y_cell(n_cell_dofs);
-  for (types::global_dof_index i = 0; i < n_cell_dofs; ++i)
-    y_cell[i] = y[i];
+  // FEValues and FEFaceValues read through the ghosted FE-range vector.  It
+  // is sized dof_handler.n_dofs(), which get_function_values() asserts, and it
+  // holds every entry a locally owned cell can ask for, including the ones on
+  // its ghost neighbours.
+  const VectorType &y_cell = y_fe_relevant;
 
   const FEValuesExtractors::Scalar area_extractor(0);
   const FEValuesExtractors::Scalar velocity_extractor(1);
+  const FEValuesExtractors::Scalar a_hat_extractor(2); // trace area
+  const FEValuesExtractors::Scalar u_hat_extractor(3); // trace velocity
 
   const QGauss<dim>     quad_cell(fe->tensor_degree() + 1);
   const QGauss<dim - 1> quad_face(fe->tensor_degree() + 1);
@@ -1943,6 +2627,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       const unsigned int vid    = cell->material_id();
       const unsigned int n_dofs = fe->n_dofs_per_cell();
 
@@ -1960,7 +2647,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
 
       FullMatrix<double> cell_matrix(n_dofs, n_dofs);
 
-      // ---- Block (1,1) volume - cell_matrix -------------------------------
+      // ---- Block (1,1) volume - cell_matrix
+      // -------------------------------
       for (unsigned int q = 0; q < fev.n_quadrature_points; ++q)
         {
           const double A    = std::max(A_h[q], 1e-10);
@@ -1996,8 +2684,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
             }
         }
 
-      // ---- Block (1,1) face + Block (1,2) ---------------------------------
-      // Face cell-cell -> cell_matrix
+      // ---- Block (1,1) face + Block (1,2)
+      // --------------------------------- Face cell-cell ->
+      // cell_matrix
 
       for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
         {
@@ -2010,13 +2699,19 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
           fef[area_extractor].get_function_values(y_cell, Ah_q);
           fef[velocity_extractor].get_function_values(y_cell, Uh_q);
 
-          double A_hat_cur = 0.0, U_hat_cur = 0.0;
-          get_face_trace(y, cell, f, A_hat_cur, U_hat_cur);
-          const double A_hat = std::max(A_hat_cur, 1e-10);
-          const double U_hat = U_hat_cur;
+          // This cell's OWN trace values / DOFs on face f — must
+          // match the extractor read in assemble_cell_residuals,
+          // otherwise the analytic Jacobian differentiates w.r.t.
+          // the wrong column.
+          std::vector<double> Ahat_q(fef.n_quadrature_points);
+          std::vector<double> Uhat_q(fef.n_quadrature_points);
+          fef[a_hat_extractor].get_function_values(y_cell, Ahat_q);
+          fef[u_hat_extractor].get_function_values(y_cell, Uhat_q);
+          const double A_hat = std::max(Ahat_q[0], 1e-10);
+          const double U_hat = Uhat_q[0];
 
-          const auto  key = canonical_face_key(cell, f);
-          const auto &td  = face_dof_map.at(key);
+          const auto [loc_a_hat_dof, loc_u_hat_dof] = face_trace_dofs(ldofs, f);
+          const FaceTraceDof td{loc_a_hat_dof, loc_u_hat_dof};
 
           for (unsigned int q = 0; q < fef.n_quadrature_points; ++q)
             {
@@ -2050,6 +2745,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
                     {
                       const unsigned int comp =
                         fe->system_to_component_index(i).first;
+                      if (comp >= 2)
+                        continue; // trace rows carry no cell flux
                       const double phi = fef.shape_value(i, q);
                       cell_matrix(i, j) -=
                         (comp == 0 ? dFA : dFU) * phi * JxW_f[q];
@@ -2082,6 +2779,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
                     {
                       const unsigned int comp =
                         fe->system_to_component_index(i).first;
+                      if (comp >= 2)
+                        continue; // trace rows carry no cell flux
                       const double phi = fef.shape_value(i, q);
                       jacobian_matrix.add(ldofs[i],
                                           trace_col,
@@ -2091,7 +2790,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
                 }
             }
         }
-      // Single scatter: volume + face cell-cell -> jacobian_matrix
+      // Single scatter: volume + face cell-cell ->
+      // jacobian_matrix
 
       for (unsigned int i = 0; i < n_dofs; ++i)
         for (unsigned int j = 0; j < n_dofs; ++j)
@@ -2099,33 +2799,24 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_cell_block(
     }
 }
 
-// ============================================================================
-// assemble_jacobian_trace_interior_block
-//
-//   R_A = F_hat_A(bn_L,bn_L, A_L,U_L, A_hat,U_hat)
-//         + F_hat_A(bn_R,bn_R, A_R,U_R, A_hat,U_hat)
-//   R_U = F_hat_U(bn_L,bn_L, A_L,U_L, A_hat,U_hat)
-//         + F_hat_U(bn_R,bn_R, A_R,U_R, A_hat,U_hat)
-//
-// Blocks filled:
-//   (trace, cell_L)  : dR / d w_L  via left HLL flux jacobian
-//   (trace, cell_R)  : dR / d w_R  via right HLL flux jacobian
-//   (trace, trace)   : dR / d(A_hat, U_hat) summed from both fluxes
-// ============================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
-  const Vector<double> &y)
+  const VectorType &y)
 {
   TimerOutput::Scope timer(computing_timer,
                            "assemble_jacobian_trace_interior_block");
 
-  Vector<double> y_cell(n_cell_dofs);
-  for (types::global_dof_index i = 0; i < n_cell_dofs; ++i)
-    y_cell[i] = y[i];
+  // FEValues and FEFaceValues read through the ghosted FE-range vector.  It
+  // is sized dof_handler.n_dofs(), which get_function_values() asserts, and it
+  // holds every entry a locally owned cell can ask for, including the ones on
+  // its ghost neighbours.
+  const VectorType &y_cell = y_fe_relevant;
 
   const FEValuesExtractors::Scalar area_extractor(0);
   const FEValuesExtractors::Scalar velocity_extractor(1);
+  const FEValuesExtractors::Scalar a_hat_extractor(2); // trace area
+  const FEValuesExtractors::Scalar u_hat_extractor(3); // trace velocity
 
   const QGauss<dim - 1>       quad_face(1);
   FEFaceValues<dim, spacedim> fef(*fe,
@@ -2136,6 +2827,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
         {
           if (cell->face(f)->at_boundary())
@@ -2148,6 +2842,14 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
             continue;
           processed.insert(key);
 
+          // Same rule as the residual: the canonical side owns the rows.
+          {
+            const auto tit = face_dof_map.find(key);
+            Assert(tit != face_dof_map.end(), ExcInternalError());
+            if (!locally_owned_dofs.is_element(tit->second.a_hat_dof))
+              continue;
+          }
+
           const auto        &nb      = cell->neighbor(f);
           const unsigned int nb_f    = cell->neighbor_of_neighbor(f);
           const unsigned int vid_L   = cell->material_id();
@@ -2155,7 +2857,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
           const double       ad_L    = compute_a_d_local(cell);
           const double       ad_R    = compute_a_d_local(nb);
           const double       ad_face = compute_a_d_at_face(cell, f);
-          // ---- Left cell: state and normal --------------------------------
+          // ---- Left cell: state and normal
+          // --------------------------------
           fef.reinit(cell, f);
           const double bn_L =
             compute_tangent_normal_product(cell, fef.get_normal_vectors()[0]);
@@ -2197,8 +2900,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
 
           // ================================================================
           // Block (trace, cell_L): dR/dw_L
-          // Linearise F_hat(bn_L,bn_L, A_L,U_L, A_hat,U_hat) w.r.t. w_L.
-          // Interior = L (trial nonzero), exterior = trace (trial zero).
+          // Linearise F_hat(bn_L,bn_L, A_L,U_L, A_hat,U_hat)
+          // w.r.t. w_L. Interior = L (trial nonzero), exterior =
+          // trace (trial zero).
           // ================================================================
           fef.reinit(cell, f);
           for (unsigned int j = 0; j < fe->n_dofs_per_cell(); ++j)
@@ -2228,8 +2932,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
 
           // ================================================================
           // Block (trace, cell_R): dR/dw_R
-          // Linearise F_hat(bn_R,bn_R, A_R,U_R, A_hat,U_hat) w.r.t. w_R.
-          // Interior = R (trial nonzero), exterior = trace (trial zero).
+          // Linearise F_hat(bn_R,bn_R, A_R,U_R, A_hat,U_hat)
+          // w.r.t. w_R. Interior = R (trial nonzero), exterior =
+          // trace (trial zero).
           // ================================================================
           fef.reinit(nb, nb_f);
           for (unsigned int j = 0; j < fe->n_dofs_per_cell(); ++j)
@@ -2260,16 +2965,17 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
           // ================================================================
           // Block (trace, trace): dR/d(A_hat, U_hat)
           // Trace appears as the EXTERIOR state in both fluxes.
-          // Contribution from left flux: trial on exterior = (dA_hat,
-          // dU_hat). Contribution from right flux: same trial. Sum both
-          // contributions.
+          // Contribution from left flux: trial on exterior =
+          // (dA_hat, dU_hat). Contribution from right flux: same
+          // trial. Sum both contributions.
           // ================================================================
           // Unit perturbations in A_hat and U_hat:
           for (const auto &[dA_hat_trial, dU_hat_trial, col] :
                {std::tuple{1.0, 0.0, td.a_hat_dof},
                 std::tuple{0.0, 1.0, td.u_hat_dof}})
             {
-              // Left flux: exterior trial = (dA_hat_trial, dU_hat_trial)
+              // Left flux: exterior trial = (dA_hat_trial,
+              // dU_hat_trial)
               const auto [dFA_L, dFU_L] =
                 numerical_flux_jac(bn_L,
                                    bn_L,
@@ -2286,7 +2992,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
                                    ad_L,
                                    ad_face);
 
-              // Right flux: exterior trial = (dA_hat_trial, dU_hat_trial)
+              // Right flux: exterior trial = (dA_hat_trial,
+              // dU_hat_trial)
               const auto [dFA_R, dFU_R] =
                 numerical_flux_jac(bn_R,
                                    bn_R,
@@ -2310,24 +3017,25 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_interior_block(
     }
 }
 
-// ============================================================================
-// assemble_jacobian_trace_boundary_block
-// ============================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
-  const double          t,
-  const Vector<double> &y)
+  const double      t,
+  const VectorType &y)
 {
   TimerOutput::Scope timer(computing_timer,
                            "assemble_jacobian_trace_boundary_block");
 
-  Vector<double> y_cell(n_cell_dofs);
-  for (types::global_dof_index i = 0; i < n_cell_dofs; ++i)
-    y_cell[i] = y[i];
+  // FEValues and FEFaceValues read through the ghosted FE-range vector.  It
+  // is sized dof_handler.n_dofs(), which get_function_values() asserts, and it
+  // holds every entry a locally owned cell can ask for, including the ones on
+  // its ghost neighbours.
+  const VectorType &y_cell = y_fe_relevant;
 
   const FEValuesExtractors::Scalar area_extractor(0);
   const FEValuesExtractors::Scalar velocity_extractor(1);
+  const FEValuesExtractors::Scalar a_hat_extractor(2); // trace area
+  const FEValuesExtractors::Scalar u_hat_extractor(3); // trace velocity
 
   const QGauss<dim - 1>       quad_face(1);
   FEFaceValues<dim, spacedim> fef(*fe, quad_face, update_values);
@@ -2336,6 +3044,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
+      if (!cell->is_locally_owned())
+        continue;
+
       for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
         {
           if (!cell->face(f)->at_boundary())
@@ -2355,7 +3066,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
           const double A_int     = std::max(A_int_v[0], 1e-10);
           const double a_d_local = compute_a_d_at_face(cell, f);
           // const double U_int  = U_int_v[0];
-          // const double c0     = compute_wave_speed(vpp.a_d, vid);
+          // const double c0     = compute_wave_speed(vpp.a_d,
+          // vid);
           const double dc_int =
             compute_wave_speed_derivative(A_int, vid, a_d_local);
 
@@ -2381,11 +3093,13 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
               // R2 = U_hat - 4(c_hat - c0) - W2_int
               // where W2_int = U_int - 4(c_int - c0)
 
-              // \partialR1/ \partialA_hat, \partialR1/ \partialU_hat
+              // \partialR1/ \partialA_hat, \partialR1/
+              // \partialU_hat
               jacobian_matrix.add(a_row, a_row, U_hat_cur);
               jacobian_matrix.add(a_row, u_row, A_hat);
 
-              // \partialR2/\partialA_hat, \partialR2/\partialU_hat
+              // \partialR2/\partialA_hat,
+              // \partialR2/\partialU_hat
               jacobian_matrix.add(u_row, a_row, -4.0 * dc_hat);
               jacobian_matrix.add(u_row, u_row, 1.0);
 
@@ -2394,7 +3108,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
                 {
                   const double phi_A = fef[area_extractor].value(j, 0);
                   const double phi_U = fef[velocity_extractor].value(j, 0);
-                  // \partialW2_int/\partialw_int = phi_U - 4*dc_int*phi_A
+                  // \partialW2_int/\partialw_int = phi_U -
+                  // 4*dc_int*phi_A
                   jacobian_matrix.add(u_row,
                                       ldofs[j],
                                       -(phi_U - 4.0 * dc_int * phi_A));
@@ -2441,9 +3156,10 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
                   // res_A = P(A_hat) - R2*(A_hat*U_hat) - P_out
                   // res_U = U_hat + 4(c_hat - c0) - W1_int
                   //
-                  // dres_A/dA_hat = dP/dA_hat - R2*U_hat   (same form as RCR
-                  // with R2) dres_A/dU_hat = -R2*A_hat               (R2
-                  // replaces R1) Pc term drops out (no capacitor, no time
+                  // dres_A/dA_hat = dP/dA_hat - R2*U_hat   (same
+                  // form as RCR with R2) dres_A/dU_hat =
+                  // -R2*A_hat               (R2 replaces R1) Pc
+                  // term drops out (no capacitor, no time
                   // derivative)
                   jacobian_matrix.add(a_row,
                                       a_row,
@@ -2452,7 +3168,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
 
                   // dres_U/dA_hat = 4*dc_hat
                   // dres_U/dU_hat = 1
-                  // (identical to RCR — res_U has no R dependence)
+                  // (identical to RCR — res_U has no R
+                  // dependence)
                   jacobian_matrix.add(u_row, a_row, 4.0 * dc_hat);
                   jacobian_matrix.add(u_row, u_row, 1.0);
 
@@ -2474,15 +3191,18 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
               // R1 = U_hat + 4(c_hat - c0) - W1_int
               // R2 = U_hat - 4(c_hat - c0) - (-Rt * W1_int)
 
-              // \partialR1/\partialA_hat, \partialR1/\partialU_hat
+              // \partialR1/\partialA_hat,
+              // \partialR1/\partialU_hat
               jacobian_matrix.add(a_row, a_row, 4.0 * dc_hat);
               jacobian_matrix.add(a_row, u_row, 1.0);
 
-              // \partialR2/\partialA_hat, \partialR2/\partialU_hat
+              // \partialR2/\partialA_hat,
+              // \partialR2/\partialU_hat
               jacobian_matrix.add(u_row, a_row, -4.0 * dc_hat);
               jacobian_matrix.add(u_row, u_row, 1.0);
 
-              // \partialR1 and \partialR2 /\partial(A_int,U_int) via W1_int
+              // \partialR1 and \partialR2 /\partial(A_int,U_int)
+              // via W1_int
               for (unsigned int j = 0; j < fe->n_dofs_per_cell(); ++j)
                 {
                   const double phi_A = fef[area_extractor].value(j, 0);
@@ -2496,68 +3216,65 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
     }
 }
 
-//================================================
-// assemble_rcr_capacitor_equations in jacobian assembly
-// RCR capacitor equations are ODEs, so their Jacobian contributions are just
-// the derivatives of the residual w.r.t. the capacitor state DOFs (no coupling
-// to cell DOFs, no dependence on trace DOFs).
-//=========================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::assemble_jacobian_rcr_capacitor_block(
-  const Vector<double> &y)
+  const VectorType &y)
 {
   if (rcr_pc_dof.empty())
     return;
 
   for (const auto &cell : dof_handler.active_cell_iterators())
-    for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-      {
-        if (!cell->face(f)->at_boundary())
-          continue;
-        if (is_junction_face(cell->id(), f))
-          continue;
-        const auto pit = rcr_pc_dof.find(cell->face(f)->boundary_id());
-        if (pit == rcr_pc_dof.end())
-          continue;
+    {
+      if (!cell->is_locally_owned())
+        continue;
 
-        const types::global_dof_index pc_dof = pit->second;
-        const auto &rcr = rcr_map.at(cell->face(f)->boundary_id());
-        const auto &td  = face_dof_map.at(canonical_face_key(cell, f));
+      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        {
+          if (!cell->face(f)->at_boundary())
+            continue;
+          if (is_junction_face(cell->id(), f))
+            continue;
+          const auto pit = rcr_pc_dof.find(cell->face(f)->boundary_id());
+          if (pit == rcr_pc_dof.end())
+            continue;
 
-        double A_hat = 0.0, U_hat = 0.0;
-        get_face_trace(y, cell, f, A_hat, U_hat);
+          const types::global_dof_index pc_dof = pit->second;
+          const auto &rcr = rcr_map.at(cell->face(f)->boundary_id());
+          const auto &td  = face_dof_map.at(canonical_face_key(cell, f));
 
-        // R_pc = A_hat*U_hat - (Pc - P_out)/R2
-        jacobian_matrix.add(pc_dof, td.a_hat_dof, U_hat);
-        jacobian_matrix.add(pc_dof, td.u_hat_dof, A_hat);
-        jacobian_matrix.add(pc_dof, pc_dof, -1.0 / rcr.R2);
+          double A_hat = 0.0, U_hat = 0.0;
+          get_face_trace(y, cell, f, A_hat, U_hat);
 
-        // res_A = P(Â) - R1*Q - Pc  ->  d(res_A)/dPc = -1
-        jacobian_matrix.add(td.a_hat_dof, pc_dof, -1.0);
-      }
+          // R_pc = A_hat*U_hat - (Pc - P_out)/R2
+          jacobian_matrix.add(pc_dof, td.a_hat_dof, U_hat);
+          jacobian_matrix.add(pc_dof, td.u_hat_dof, A_hat);
+          jacobian_matrix.add(pc_dof, pc_dof, -1.0 / rcr.R2);
+
+          // res_A = P(Â) - R1*Q - Pc  ->  d(res_A)/dPc = -1
+          jacobian_matrix.add(td.a_hat_dof, pc_dof, -1.0);
+        }
+    }
 }
 
-// ============================================================================
-// assemble_jacobian_trace_junction_block
-//
-// Differentiates the junction residuals (mass conservation, total-head
-// continuity, Riemann compatibility) w.r.t. all cell and trace DOFs.
-// ============================================================================
 template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
-  const Vector<double> &y)
+  const VectorType &y)
 {
   TimerOutput::Scope timer(computing_timer,
                            "assemble_jacobian_trace_junction_block");
 
-  Vector<double> y_cell(n_cell_dofs);
-  for (types::global_dof_index i = 0; i < n_cell_dofs; ++i)
-    y_cell[i] = y[i];
+  // FEValues and FEFaceValues read through the ghosted FE-range vector.  It
+  // is sized dof_handler.n_dofs(), which get_function_values() asserts, and it
+  // holds every entry a locally owned cell can ask for, including the ones on
+  // its ghost neighbours.
+  const VectorType &y_cell = y_fe_relevant;
 
   const FEValuesExtractors::Scalar area_extractor(0);
   const FEValuesExtractors::Scalar velocity_extractor(1);
+  const FEValuesExtractors::Scalar a_hat_extractor(2); // trace area
+  const FEValuesExtractors::Scalar u_hat_extractor(3); // trace velocity
 
   const QGauss<dim - 1>       quad_face(1);
   FEFaceValues<dim, spacedim> fef(*fe, quad_face, update_values);
@@ -2596,16 +3313,30 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
           dc_int_v[i] = compute_wave_speed_derivative(A_int[i], vid, a_d_face);
 
 
-          // c0[i]       = compute_wave_speed(vessel_map.at(vid).a_d, vid);
-          // dc_int_v[i] = compute_wave_speed_derivative(A_int[i], vid);
+          // c0[i]       =
+          // compute_wave_speed(vessel_map.at(vid).a_d, vid);
+          // dc_int_v[i] = compute_wave_speed_derivative(A_int[i],
+          // vid);
 
-          const auto  key = canonical_face_key(hf.cell, hf.face_no);
-          const auto &td  = face_dof_map.at(key);
-          a_row[i]        = td.a_hat_dof;
-          u_row[i]        = td.u_hat_dof;
+          // const auto  key = canonical_face_key(hf.cell, hf.face_no);
+          // const auto &td  = face_dof_map.at(key);
+          // a_row[i]        = td.a_hat_dof;
+          // u_row[i]        = td.u_hat_dof;
 
-          A_hat[i] = std::max(y[a_row[i]], A_min);
-          U_hat[i] = y[u_row[i]];
+          // A_hat[i] = std::max(y(a_row[i]), A_min);
+          // U_hat[i] = y(u_row[i]);
+
+          std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
+          hf.cell->get_dof_indices(ldofs);
+
+          const auto [a_hat_dof, u_hat_dof] =
+            face_trace_dofs(ldofs, hf.face_no);
+
+          a_row[i] = a_hat_dof;
+          u_row[i] = u_hat_dof;
+
+          A_hat[i] = std::max(y(a_row[i]), A_min);
+          U_hat[i] = y(u_row[i]);
 
           c_hat_v[i]  = compute_wave_speed(A_hat[i], vid, a_d_face);
           dc_hat_v[i] = compute_wave_speed_derivative(A_hat[i], vid, a_d_face);
@@ -2615,23 +3346,31 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
           hf.cell->get_dof_indices(cell_dofs[i]);
         }
 
-      // Row a_row[0]: mass conservation \sum s_i A_hat_i U_hat_i = 0
-      for (unsigned int i = 0; i < K; ++i)
-        {
-          const double s = static_cast<double>(orient[i]);
-          jacobian_matrix.add(a_row[0], a_row[i], s * U_hat[i]);
-          jacobian_matrix.add(a_row[0], u_row[i], s * A_hat[i]);
-        }
+      // Row a_row[0]: mass conservation \sum s_i A_hat_i U_hat_i = 0.
+      // Each row group is guarded exactly as in the residual, so the two stay
+      // in step and the sparsity built by build_junction_sparsity() matches.
+      if (locally_owned_dofs.is_element(a_row[0]))
+        for (unsigned int i = 0; i < K; ++i)
+          {
+            const double s = static_cast<double>(orient[i]);
+            jacobian_matrix.add(a_row[0], a_row[i], s * U_hat[i]);
+            jacobian_matrix.add(a_row[0], u_row[i], s * A_hat[i]);
+          }
 
       // Rows u_row[0..K-2]: H_0 − H_i = 0
       for (unsigned int i = 1; i < K; ++i)
         {
-          // \partialH_0/\partialA_hat_0 , \partialH_0/\partialU_hat_0
+          if (!locally_owned_dofs.is_element(u_row[i - 1]))
+            continue;
+
+          // \partialH_0/\partialA_hat_0 ,
+          // \partialH_0/\partialU_hat_0
           jacobian_matrix.add(u_row[i - 1], a_row[0], dP_hat[0] / rho);
-          // jacobian_matrix.add(u_row[i - 1], u_row[0], U_hat[0]);
-          //  \partial(-H_i)/\partialA_hat_i, \partial(-H_i)/\partialU_hat_i
+          jacobian_matrix.add(u_row[i - 1], u_row[0], gamma * U_hat[0]);
+          //  \partial(-H_i)/\partialA_hat_i,
+          //  \partial(-H_i)/\partialU_hat_i
           jacobian_matrix.add(u_row[i - 1], a_row[i], -dP_hat[i] / rho);
-          // jacobian_matrix.add(u_row[i - 1], u_row[i], -U_hat[i]);
+          jacobian_matrix.add(u_row[i - 1], u_row[i], -gamma * U_hat[i]);
         }
 
       // Compat row for vessel 0 -> u_row[K-1]
@@ -2641,8 +3380,11 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
           const double                  s  = static_cast<double>(orient[i]);
           const types::global_dof_index rr = (i == 0) ? u_row[K - 1] : a_row[i];
 
-          // \partial/\partialA_hat_i, \partial/\partialU_hat_i of (U_hat_i +
-          // s*4(c_hat_i - c0_i) - W_i)
+          if (!locally_owned_dofs.is_element(rr))
+            continue;
+
+          // \partial/\partialA_hat_i, \partial/\partialU_hat_i of
+          // (U_hat_i + s*4(c_hat_i - c0_i) - W_i)
           jacobian_matrix.add(rr, a_row[i], s * 4.0 * dc_hat_v[i]);
           jacobian_matrix.add(rr, u_row[i], 1.0);
 
@@ -2654,7 +3396,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
             {
               const double phi_A = fef[area_extractor].value(j, 0);
               const double phi_U = fef[velocity_extractor].value(j, 0);
-              // \partialW_i/\partialw = phi_U + s*4*dc_int_v[i]*phi_A
+              // \partialW_i/\partialw = phi_U +
+              // s*4*dc_int_v[i]*phi_A
               const double dW = phi_U + s * 4.0 * dc_int_v[i] * phi_A;
               jacobian_matrix.add(rr, cell_dofs[i][j], -dW);
             }
@@ -2664,203 +3407,124 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
 }
 
 // ============================================================================
-// assemble_jacobian
-//
-// Builds  J = d f(t,y) / d y  where f = [M_K^-1 F_cell ; F_trace].
-//
-// Cell rows:  J_cell_rows = M_K^-1 * (d F_cell / d y)
-// Trace rows: J_trace_rows = d F_trace / d y  (unchanged)
-//
-// We assemble d F / d y first, then apply M_K^-1 row-by-row to the
-// cell rows only.
-// ============================================================================
-template <int dim, int spacedim>
-void
-BloodFlowSystem<dim, spacedim>::assemble_jacobian(
-  const double          t,
-  const Vector<double> &y,
-  const Vector<double> & /*ydot*/,
-  const double alpha)
-{
-  TimerOutput::Scope timer(computing_timer, "assemble_jacobian");
-  deallog.push("assemble_jacobian");
-  deallog << "t=" << t << std::endl;
-
-  AssertDimension(y.size(), n_total_dofs);
-  jacobian_matrix = 0;
-
-  // ---- Assemble raw d F / d y ---------------------------------------------
-  assemble_jacobian_cell_block(t, y);
-  assemble_jacobian_trace_interior_block(y);
-  assemble_jacobian_trace_boundary_block(t, y);
-  assemble_jacobian_trace_junction_block(y);
-  assemble_jacobian_rcr_capacitor_block(y);
-
-  // ---- Negate: dF/dy = −dR/dy -------------------------------------------
-  // Residual is F = M*ydot − R_cell (cell) and F = −R_trace (trace)
-  // so dF/dy = −dR/dy for both blocks.
-  jacobian_matrix *= -1.0;
-
-  // ---- Add alpha*M_K to cell-block (dF/dydot term)
-  // --------------------------- J_IDA = dF/dy + alpha · dF/dẏ = −dR/dy +
-  // alpha · M_block M_block is M_K on cell rows, zero on trace rows.
-
-  const unsigned int n_dofs = fe->n_dofs_per_cell();
-
-  for (const auto &cell : dof_handler.active_cell_iterators())
-    {
-      std::vector<types::global_dof_index> ldofs(n_dofs);
-      cell->get_dof_indices(ldofs);
-
-      const FullMatrix<double> &M_K = per_cell_mass_.at(cell->id());
-
-      for (unsigned int i = 0; i < n_dofs; ++i)
-        for (unsigned int j = 0; j < n_dofs; ++j)
-          jacobian_matrix.add(ldofs[i], ldofs[j], alpha * M_K(i, j));
-    }
-
-  // alpha * C on capacitor diagonal (the dF/dẏ term for Pc rows)
-  for (const auto &[bid, pc_dof] : rcr_pc_dof)
-    {
-      jacobian_matrix.add(pc_dof, pc_dof, alpha * rcr_map.at(bid).C);
-    }
-  deallog.pop();
-}
-
-// ============================================================================
 // compute_pressure
 // ============================================================================
 template <int dim, int spacedim>
 void
-BloodFlowSystem<dim, spacedim>::compute_pressure(const Vector<double> &y,
-                                                 Vector<double>       &p) const
+BloodFlowSystem<dim, spacedim>::compute_pressure(const VectorType &y,
+                                                 VectorType       &p) const
 {
   TimerOutput::Scope timer(computing_timer, "compute_pressure");
-  AssertDimension(y.size(), n_total_dofs);
 
-  p.reinit(n_total_dofs);
+  p = 0.0;
+
+  std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
 
   for (const auto &cell : dof_handler.active_cell_iterators())
     {
-      std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
+      if (!cell->is_locally_owned())
+        continue;
+
       cell->get_dof_indices(ldofs);
 
       for (unsigned int i = 0; i < fe->n_dofs_per_cell(); ++i)
         if (fe->system_to_component_index(i).first == 0)
           {
-            const double A = y[ldofs[i]];
-            // p[ldofs[i]]    = compute_pressure_value(A, cell->material_id());
-            p[ldofs[i]] = compute_pressure_value(A,
+            const double A = y(ldofs[i]);
+            p(ldofs[i])    = compute_pressure_value(A,
                                                  cell->material_id(),
                                                  compute_a_d_local(cell));
           }
     }
+
+  p.compress(VectorOperation::insert);
 }
 
-// ============================================================================
-// compute_theoretical_peak
-// ============================================================================
-template <int dim, int spacedim>
-void
-BloodFlowSystem<dim, spacedim>::compute_theoretical_peak(
-  Vector<double> &tp) const
-{
-  tp.reinit(n_total_dofs);
-
-  const double xi  = par["xi"];
-  const double mu  = par["mu"];
-  const double rho = par["rho"];
-
-  const auto  &props = vessel_map.at(0);
-  const double Ad    = props.a_d;
-  const double c0    = compute_wave_speed(Ad, 0);
-
-  for (const auto &cell : dof_handler.active_cell_iterators())
-    {
-      std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
-      cell->get_dof_indices(ldofs);
-
-      const double x = cell->center()[0];
-      const double val =
-        std::exp(-(xi + 2.0) * numbers::PI * mu * x / (c0 * Ad * rho));
-
-      for (unsigned int i = 0; i < fe->n_dofs_per_cell(); ++i)
-        tp[ldofs[i]] = val;
-    }
-}
 
 // ============================================================================
 // output_results
+//
+// DataOut needs a ghosted vector over the FE range: it evaluates on every
+// locally owned cell, whose DoFs are all owned, but the ghosted form is what
+// the interface expects and it costs one exchange per field.  Each rank
+// writes its own .vtu and rank 0 records the .pvtu/.pvd, which is the
+// standard deal.II parallel output path -- no gathering to one rank.
 // ============================================================================
 template <int dim, int spacedim>
 void
-BloodFlowSystem<dim, spacedim>::output_results(
-  const Vector<double> &y,
-  const Vector<double> &pressure_vec,
-  const Vector<double> &tp,
-  const unsigned int    cycle) const
+BloodFlowSystem<dim, spacedim>::output_results(const VectorType  &y,
+                                               const VectorType  &pressure_vec,
+                                               const unsigned int cycle) const
 {
   TimerOutput::Scope timer(computing_timer, "output_results");
 
-  const std::string rel =
-    output_filename + "-" + std::to_string(cycle) + ".vtu";
-  const std::string fname =
-    output_directory + (output_directory.empty() ? "" : "/") + rel;
+  const std::string dir =
+    output_directory + (output_directory.empty() ? "" : "/");
 
-  // Extract cell-block sub-vector for DataOut
-  Vector<double> cell_sol(n_cell_dofs);
-  Vector<double> cell_p(n_cell_dofs);
-  Vector<double> cell_tp(n_cell_dofs);
-  for (types::global_dof_index i = 0; i < n_cell_dofs; ++i)
-    {
-      cell_sol[i] = y[i];
-      cell_p[i]   = pressure_vec[i];
-      cell_tp[i]  = tp[i];
-    }
+  // Restrict each field to the FE range and give it ghost entries.
+  auto to_fe_ghosted = [this](const VectorType &src) {
+    VectorType owned(locally_owned_fe_dofs, mpi_communicator);
+    for (const auto i : locally_owned_fe_dofs)
+      owned(i) = src(i);
+    owned.compress(VectorOperation::insert);
+
+    VectorType ghosted(locally_owned_fe_dofs,
+                       locally_relevant_fe_dofs,
+                       mpi_communicator);
+    ghosted = owned;
+    return ghosted;
+  };
+
+  const VectorType sol_fe = to_fe_ghosted(y);
+  const VectorType p_fe   = to_fe_ghosted(pressure_vec);
 
   DataOut<dim, spacedim> data_out;
   data_out.attach_dof_handler(dof_handler);
 
-  std::vector<std::string> names = {"area", "velocity"};
   std::vector<DataComponentInterpretation::DataComponentInterpretation> interp(
-    2, DataComponentInterpretation::component_is_scalar);
+    4, DataComponentInterpretation::component_is_scalar);
 
-  data_out.add_data_vector(cell_sol,
+  std::vector<std::string> names = {"area", "velocity", "A_hat", "U_hat"};
+  data_out.add_data_vector(sol_fe,
                            names,
                            DataOut<dim, spacedim>::type_dof_data,
                            interp);
 
-  names[0] = "pressure";
-  names[1] = "unused";
-  data_out.add_data_vector(cell_p,
+  names = {"pressure", "unused", "unused_p2", "unused_p3"};
+  data_out.add_data_vector(p_fe,
                            names,
                            DataOut<dim, spacedim>::type_dof_data,
                            interp);
 
-  names[0] = "theoretical_peak";
-  names[1] = "unused1";
-  data_out.add_data_vector(cell_tp,
-                           names,
-                           DataOut<dim, spacedim>::type_dof_data,
-                           interp);
+  // Which rank owns which cell, so the partition is visible in the output.
+  Vector<double> subdomain(triangulation.n_active_cells());
+  for (unsigned int i = 0; i < subdomain.size(); ++i)
+    subdomain(i) = triangulation.locally_owned_subdomain();
+  data_out.add_data_vector(subdomain, "subdomain");
 
   data_out.build_patches();
 
-  std::ofstream out(fname);
-  data_out.write_vtu(out);
-
+  // Writes <name>-<cycle>.<rank>.vtu on each rank plus the .pvtu record, and
+  // appends the time step to the .pvd on rank 0.
   static std::vector<std::pair<double, std::string>> pvd_records;
-  pvd_records.emplace_back(time, rel);
+  const std::string pvtu = data_out.write_vtu_with_pvtu_record(
+    dir, output_filename, cycle, mpi_communicator, 5);
 
-  std::ofstream pvd(output_directory + (output_directory.empty() ? "" : "/") +
-                    output_filename + ".pvd");
-  DataOutBase::write_pvd_record(pvd, pvd_records);
-
-  std::cout << "  Wrote <" << fname << ">" << std::endl;
+  if (this_mpi_process == 0)
+    {
+      pvd_records.emplace_back(time, pvtu);
+      std::ofstream pvd(dir + output_filename + ".pvd");
+      DataOutBase::write_pvd_record(pvd, pvd_records);
+      pcout << "  Wrote <" << pvtu << ">" << std::endl;
+    }
 }
 
 // ============================================================================
 // compute_errors
+//
+// integrate_difference() fills one entry per locally owned cell and
+// compute_global_error() does the reduction across ranks, so the printed
+// numbers are the global ones.
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -2868,21 +3532,29 @@ BloodFlowSystem<dim, spacedim>::compute_errors(const unsigned int k)
 {
   TimerOutput::Scope timer(computing_timer, "compute_errors");
 
-  const ComponentSelectFunction<spacedim> area_mask(0, 1.0, 2);
-  const ComponentSelectFunction<spacedim> vel_mask(1, 1.0, 2);
+  // The FE has 4 components (A, U, A_hat, U_hat), so the masks select out of
+  // 4 and `exact_solution` must be a 4-component Function; components 2,3 are
+  // masked out.  Meaningful only for manufactured-solution verification runs.
+  const ComponentSelectFunction<spacedim> area_mask(0, 1.0, 4);
+  const ComponentSelectFunction<spacedim> vel_mask(1, 1.0, 4);
 
   Vector<float> diff(triangulation.n_active_cells());
 
-  // Work on the cell sub-vector only
-  Vector<double> cell_sol(n_cell_dofs);
-  for (types::global_dof_index i = 0; i < n_cell_dofs; ++i)
-    cell_sol[i] = solution[i];
+  VectorType cell_sol(locally_owned_fe_dofs, mpi_communicator);
+  for (const auto i : locally_owned_fe_dofs)
+    cell_sol(i) = solution(i);
+  cell_sol.compress(VectorOperation::insert);
+
+  VectorType cell_sol_ghosted(locally_owned_fe_dofs,
+                              locally_relevant_fe_dofs,
+                              mpi_communicator);
+  cell_sol_ghosted = cell_sol;
 
   exact_solution.set_time(time);
 
   auto l2_error = [&](const ComponentSelectFunction<spacedim> &mask) {
     VectorTools::integrate_difference(dof_handler,
-                                      cell_sol,
+                                      cell_sol_ghosted,
                                       exact_solution,
                                       diff,
                                       QGauss<dim>(fe_degree + 3),
@@ -2894,7 +3566,7 @@ BloodFlowSystem<dim, spacedim>::compute_errors(const unsigned int k)
   };
   auto h1_error = [&](const ComponentSelectFunction<spacedim> &mask) {
     VectorTools::integrate_difference(dof_handler,
-                                      cell_sol,
+                                      cell_sol_ghosted,
                                       exact_solution,
                                       diff,
                                       QGauss<dim>(fe_degree + 3),
@@ -2916,15 +3588,20 @@ BloodFlowSystem<dim, spacedim>::compute_errors(const unsigned int k)
     return (k == 0 || prev == 0.0) ? 0.0 : std::log(prev / cur) / std::log(2.0);
   };
 
-  std::cout << std::scientific << std::setprecision(3)
-            << "=== Errors t=" << time << " cycle " << k + 1 << " ===\n"
-            << " A  L2=" << AL2 << " rate=" << rate(prev_AL2, AL2) << "\n"
-            << " A  H1=" << AH1 << " rate=" << rate(prev_AH1, AH1) << "\n"
-            << " U  L2=" << UL2 << " rate=" << rate(prev_UL2, UL2) << "\n"
-            << " U  H1=" << UH1 << " rate=" << rate(prev_UH1, UH1) << "\n"
-            << " DoFs cell=" << n_cell_dofs << " trace=" << n_trace_dofs
-            << " total=" << n_total_dofs << "\n"
-            << std::string(60, '=') << "\n";
+  pcout << std::scientific << std::setprecision(3) << "=== Errors t=" << time
+        << " cycle " << k + 1 << " ===\n"
+        << " A  L2=" << AL2 << " rate=" << rate(prev_AL2, AL2) << "\n"
+        << " A  H1=" << AH1 << " rate=" << rate(prev_AH1, AH1) << "\n"
+        << " U  L2=" << UL2 << " rate=" << rate(prev_UL2, UL2) << "\n"
+        << " U  H1=" << UH1 << " rate=" << rate(prev_UH1, UH1) << "\n"
+        << " DoFs cell="
+        << Utilities::MPI::sum<types::global_dof_index>(
+             cell_dofs_owned.n_elements(), mpi_communicator)
+        << " trace="
+        << Utilities::MPI::sum<types::global_dof_index>(
+             trace_dofs_owned.n_elements(), mpi_communicator)
+        << " total=" << n_total_dofs << "\n"
+        << std::string(60, '=') << "\n";
 
   prev_AL2 = AL2;
   prev_AH1 = AH1;
@@ -2939,277 +3616,209 @@ template <int dim, int spacedim>
 void
 BloodFlowSystem<dim, spacedim>::run()
 {
-  std::cout << "=== Blood Flow HDG, polynomial degree p = " << fe_degree
-            << " (cell DOFs + global face traces) ===\n";
+  pcout << "=== Blood Flow HDG, polynomial degree p = " << fe_degree
+        << ", running on " << n_mpi_processes << " MPI rank(s) ===\n";
+
   for (unsigned int cycle = 0; cycle < n_refinement_cycles; ++cycle)
     {
-      std::cout << "\n--- Refinement cycle " << cycle << " ---\n";
+      if (verbosity > 0)
+        pcout << "\n--- Refinement cycle " << cycle << " ---\n";
 
-      // ====================================================================
-      // 1. MESH + VTK DATA (only on the first refinement cycle)
-      // ====================================================================
       if (cycle == 0)
-        {
-          dealii::GridIn<dim, spacedim> grid_in;
-          grid_in.attach_triangulation(triangulation);
-          std::cout << "Reading VTK file: " << vtk_file_path << std::endl;
-          std::ifstream mesh_file(vtk_file_path);
-          grid_in.read_vtk(mesh_file);
-
-          VTKUtils::read_cell_data(vtk_file_path, "vessel_id", cell_vessel_ids);
-          VTKUtils::read_cell_data(vtk_file_path, "a0", cell_a0);
-          VTKUtils::read_cell_data(vtk_file_path, "a_d", cell_a_d);
-          VTKUtils::read_cell_data(vtk_file_path, "E", cell_E);
-          VTKUtils::read_cell_data(vtk_file_path, "h_wall", cell_h_wall);
-          VTKUtils::read_cell_data(vtk_file_path, "p_d", cell_p_d);
-          VTKUtils::read_cell_data(vtk_file_path, "p0", cell_p0);
-          VTKUtils::read_cell_data(vtk_file_path, "L", cell_L);
-          VTKUtils::read_cell_data(vtk_file_path, "r_d", cell_r_d);
-
-          // Tapered radii are optional.
-          try
-            {
-              VTKUtils::read_cell_data(vtk_file_path, "r_in", cell_r_in);
-            }
-          catch (...)
-            {
-              cell_r_in.reinit(0);
-            }
-          try
-            {
-              VTKUtils::read_cell_data(vtk_file_path, "r_out", cell_r_out);
-            }
-          catch (...)
-            {
-              cell_r_out.reinit(0);
-            }
-
-          VTKUtils::read_vertex_data(vtk_file_path, "R1", point_R1);
-          VTKUtils::read_vertex_data(vtk_file_path, "R2", point_R2);
-          VTKUtils::read_vertex_data(vtk_file_path, "C", point_C);
-          VTKUtils::read_vertex_data(vtk_file_path, "P_out", point_P_out);
-          VTKUtils::read_vertex_data(vtk_file_path,
-                                     "boundary_id",
-                                     point_boundary_id);
-
-          // Material IDs + boundary IDs from VTK.
-          {
-            unsigned int cell_idx = 0;
-            for (auto &cell : triangulation.active_cell_iterators())
-              {
-                cell->set_material_id(
-                  static_cast<unsigned int>(cell_vessel_ids[cell_idx]));
-                for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell;
-                     ++f)
-                  if (cell->face(f)->at_boundary())
-                    {
-                      const unsigned int v = cell->face(f)->vertex_index(0);
-                      cell->face(f)->set_boundary_id(
-                        static_cast<types::boundary_id>(point_boundary_id[v]));
-                    }
-                ++cell_idx;
-              }
-          }
-
-          // RCR map.
-          rcr_map.clear();
-          for (const auto &cell : triangulation.active_cell_iterators())
-            for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
-              if (cell->face(f)->at_boundary())
-                {
-                  const types::boundary_id bid = cell->face(f)->boundary_id();
-                  if (bid == 0)
-                    continue; // inflow
-                  const unsigned int v = cell->face(f)->vertex_index(0);
-                  RCRPhysics         rcr;
-                  rcr.R1    = point_R1[v];
-                  rcr.R2    = point_R2[v];
-                  rcr.C     = point_C[v];
-                  rcr.P_out = point_P_out[v];
-                  if (rcr.R2 > 0.0)
-                    rcr_map[bid] = rcr;
-                }
-
-          triangulation.refine_global(n_global_refinements);
-        }
+        create_triangulation();
       else
         {
+          // The coarse mesh is gone by now, so refine the distributed mesh in
+          // place.  fullydistributed::Triangulation supports uniform
+          // refinement without repartitioning; the ownership of a child is
+          // that of its parent, so every map rebuilt in setup_system() stays
+          // consistent.
           triangulation.refine_global(1);
         }
 
-      // ====================================================================
-      // 2. SYSTEM SETUP
-      // ====================================================================
       setup_system();
       open_csv_files();
       initialize_terminal_capacitors();
-      compute_theoretical_peak(theoretical_peak);
       build_per_cell_mass_inv();
       compute_initial_solution(solution, ida_parameters.initial_time);
       initialize_trace_unknowns(solution, ida_parameters.initial_time);
       time = ida_parameters.initial_time;
 
-      auto check_jacobian_fd = [this](const Vector<double> &y0) {
+      // ---- finite-difference Jacobian check --------------------------------
+      // Central differences along a random direction.  Everything here is a
+      // collective distributed operation: the direction is seeded per rank
+      // but only its owned entries are filled, and the norms and the worst
+      // row are reduced across the communicator.
+      auto check_jacobian_fd = [this](const VectorType &y0) {
         const double t     = time;
         const double eps   = 1e-7;
         const double alpha = 0.0;
 
-        Vector<double> ydot0(n_total_dofs);
+        VectorType ydot0(locally_owned_dofs, mpi_communicator);
         ydot0 = 0.0;
 
-        // Assemble Jacobian
-
         assemble_jacobian(t, y0, ydot0, alpha);
-        // Random direction
-        Vector<double> v(n_total_dofs);
 
-        std::srand(0);
-        for (unsigned int i = 0; i < n_total_dofs; ++i)
-          v[i] = 2.0 * std::rand() / double(RAND_MAX) - 1.0;
+        VectorType v(locally_owned_dofs, mpi_communicator);
+        std::srand(this_mpi_process + 1);
+        for (const auto i : locally_owned_dofs)
+          v(i) = 2.0 * std::rand() / double(RAND_MAX) - 1.0;
+        v.compress(VectorOperation::insert);
 
-        // y+eps*v and y-eps*v
-        Vector<double> yp(y0);
-        Vector<double> ym(y0);
-
+        VectorType yp(y0), ym(y0);
         yp.add(eps, v);
         ym.add(-eps, v);
-        // Residuals
-        Vector<double> Fp(n_total_dofs);
-        Vector<double> Fm(n_total_dofs);
 
+        VectorType Fp(locally_owned_dofs, mpi_communicator);
+        VectorType Fm(locally_owned_dofs, mpi_communicator);
         assemble_residual(t, yp, ydot0, Fp);
         assemble_residual(t, ym, ydot0, Fm);
 
-        // Central FD approximation:
-        // (F(y+eps*v)-F(y-eps*v))/(2 eps)
-        Vector<double> fd(Fp);
+        VectorType fd(Fp);
         fd -= Fm;
         fd /= (2.0 * eps);
 
-        // J*v
-        Vector<double> Jv(n_total_dofs);
+        VectorType Jv(locally_owned_dofs, mpi_communicator);
         jacobian_matrix.vmult(Jv, v);
 
-        // Difference
-        Vector<double> diff(Jv);
-        diff -= fd;
+        VectorType d(Jv);
+        d -= fd;
 
-        const double            abs_err = diff.l2_norm();
-        const double            rel_err = abs_err / std::max(1.0, fd.l2_norm());
-        double                  worst   = 0.0;
-        types::global_dof_index worst_i = 0;
-        for (types::global_dof_index i = 0; i < n_total_dofs; ++i)
-          {
-            const double d = std::abs(Jv[i] - fd[i]);
-            if (d > worst)
-              {
-                worst   = d;
-                worst_i = i;
-              }
-          }
-        std::cout << "worst row i=" << worst_i
-                  << (worst_i < n_cell_dofs ? " (CELL)" : " (TRACE)")
-                  << "  |Jv-fd|=" << worst << "  Jv=" << Jv[worst_i]
-                  << "  fd=" << fd[worst_i] << "\n";
-        // classify worst_i: which trace equation owns it?
-        for (const auto &cell : dof_handler.active_cell_iterators())
-          for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        const double abs_err = d.l2_norm();
+        const double rel_err = abs_err / std::max(1.0, fd.l2_norm());
+
+        double                  worst_local = 0.0;
+        types::global_dof_index worst_i     = numbers::invalid_dof_index;
+        for (const auto i : locally_owned_dofs)
+          if (std::abs(Jv(i) - fd(i)) > worst_local)
             {
-              const auto key = canonical_face_key(cell, f);
-              const auto it  = face_dof_map.find(key);
-              if (it == face_dof_map.end())
-                continue;
-              if (it->second.a_hat_dof == worst_i ||
-                  it->second.u_hat_dof == worst_i)
-                {
-                  const bool is_a = (it->second.a_hat_dof == worst_i);
-                  std::cout
-                    << "row " << worst_i << " is " << (is_a ? "A_hat" : "U_hat")
-                    << " of face (cell " << cell->id() << ", f=" << f
-                    << ")  vid=" << cell->material_id()
-                    << (cell->face(f)->at_boundary() ? "  BOUNDARY" : "")
-                    << (is_junction_face(cell->id(), f) ? "  JUNCTION" : "")
-                    << (!cell->face(f)->at_boundary() &&
-                            !is_junction_face(cell->id(), f) ?
-                          "  INTERIOR" :
-                          "")
-                    << "\n";
-                  goto done;
-                }
+              worst_local = std::abs(Jv(i) - fd(i));
+              worst_i     = i;
             }
-      done:;
-        std::cout << "\n=====================================\n";
-        std::cout << "Central FD Jacobian check\n";
-        std::cout << "eps        = " << eps << "\n";
-        std::cout << "||Jv-FD||  = " << abs_err << "\n";
-        std::cout << "||FD||     = " << fd.l2_norm() << "\n";
-        std::cout << "relative   = " << rel_err << "\n";
-        std::cout << "=====================================\n";
+
+        const double worst = Utilities::MPI::max(worst_local, mpi_communicator);
+
+        // Let the rank holding the worst row describe it; ties go to the
+        // lowest rank so exactly one line is printed.
+        const unsigned int reporter =
+          Utilities::MPI::min(worst_local >= worst && worst > 0.0 ?
+                                this_mpi_process :
+                                numbers::invalid_unsigned_int,
+                              mpi_communicator);
+
+        if (reporter == this_mpi_process &&
+            worst_i != numbers::invalid_dof_index)
+          std::cout << "  worst row " << worst_i << " on rank "
+                    << this_mpi_process << ": "
+                    << (cell_dofs_owned.is_element(worst_i)  ? "CELL" :
+                        trace_dofs_owned.is_element(worst_i) ? "TRACE" :
+                                                               "RCR")
+                    << "  |Jv-fd| = " << worst << std::endl;
+
+        pcout << "\n=====================================\n"
+              << "Central FD Jacobian check\n"
+              << "eps        = " << eps << "\n"
+              << "||Jv-FD||  = " << abs_err << "\n"
+              << "||FD||     = " << fd.l2_norm() << "\n"
+              << "relative   = " << rel_err << "\n"
+              << "=====================================\n";
       };
-      check_jacobian_fd(solution);
 
-      // ---- IDA setup----
+      if (verbosity > 0)
+        check_jacobian_fd(solution);
+
+      // ---- IDA setup -------------------------------------------------------
       ida_parameters.ic_type =
-        SUNDIALS::IDA<Vector<double>>::AdditionalData::use_y_diff;
-      SUNDIALS::IDA<Vector<double>> ida(ida_parameters);
+        SUNDIALS::IDA<VectorType>::AdditionalData::use_y_diff;
+      SUNDIALS::IDA<VectorType> ida(ida_parameters, mpi_communicator);
 
-      ida.reinit_vector = [this](Vector<double> &v) { v.reinit(n_total_dofs); };
+      ida.reinit_vector = [this](VectorType &v) {
+        v.reinit(locally_owned_dofs, mpi_communicator);
+      };
 
+      // The differential rows are the cell unknowns and the capacitor
+      // pressures; the traces are algebraic.  IDA wants the *global* index
+      // set, so the owned parts are gathered into one.
       ida.differential_components = [this]() -> IndexSet {
         IndexSet is(n_total_dofs);
-        is.add_range(0, n_cell_dofs); // cell DOFs carry d/dt
-        if (n_rcr_dofs > 0)
-          is.add_range(n_trace_end, n_total_dofs); // capacitor DOFs do too
-        return is;                                 // trace DOFs are algebraic
+        is.add_indices(cell_dofs_owned);
+        is.add_indices(rcr_dofs_owned);
+        is.compress();
+        return is;
       };
 
-      // Residual F(t, y, ydot) = 0
-      ida.residual = [this](const double          t,
-                            const Vector<double> &y,
-                            const Vector<double> &ydot,
-                            Vector<double>       &res) -> int {
+      ida.residual = [this](const double      t,
+                            const VectorType &y,
+                            const VectorType &ydot,
+                            VectorType       &res) -> int {
         assemble_residual(t, y, ydot, res);
         return 0;
       };
 
-      // Jacobian J = dF/dy + alpha · dF/dẏ
-      ida.setup_jacobian = [this](const double          t,
-                                  const Vector<double> &y,
-                                  const Vector<double> &ydot,
-                                  const double          alpha) -> int {
+      ida.setup_jacobian = [this](const double      t,
+                                  const VectorType &y,
+                                  const VectorType &ydot,
+                                  const double      alpha) -> int {
         TimerOutput::Scope ts(computing_timer, "setup_jacobian");
         assemble_jacobian(t, y, ydot, alpha);
         linear_system_matrix.copy_from(jacobian_matrix);
-        linear_solver.initialize(linear_system_matrix);
+
+        if (use_direct_solver)
+          {
+#ifdef USE_PETSC_LA
+            direct_solver = std::make_unique<PETScWrappers::SparseDirectMUMPS>(
+              direct_solver_control);
+#else
+            direct_solver = std::make_unique<TrilinosWrappers::SolverDirect>(
+              direct_solver_control);
+            direct_solver->initialize(linear_system_matrix);
+#endif
+          }
+        else
+          {
+            ilu_preconditioner = std::make_unique<LA::MPI::PreconditionILU>();
+            ilu_preconditioner->initialize(linear_system_matrix);
+          }
         return 0;
       };
 
-      // Linear solve: J * z = r
-      ida.solve_with_jacobian = [this](const Vector<double> &r,
-                                       Vector<double>       &z,
+      ida.solve_with_jacobian = [this](const VectorType &r,
+                                       VectorType       &z,
                                        const double /*tol*/) -> int {
         TimerOutput::Scope ts(computing_timer, "solve_with_jacobian");
-        linear_solver.vmult(z, r);
+
+        if (use_direct_solver)
+          {
+#ifdef USE_PETSC_LA
+            direct_solver->solve(linear_system_matrix, z, r);
+#else
+            direct_solver->solve(z, r);
+#endif
+          }
+        else
+          {
+            SolverControl   solver_control(1000, 1e-10 * r.l2_norm());
+            LA::SolverGMRES solver(solver_control);
+            solver.solve(linear_system_matrix, z, r, *ilu_preconditioner);
+          }
         return 0;
       };
 
-      ida.output_step = [this](const double          t,
-                               const Vector<double> &sol,
-                               const Vector<double> & /*ydot*/,
+      ida.output_step = [this](const double      t,
+                               const VectorType &sol,
+                               const VectorType & /*ydot*/,
                                const unsigned int step_number) {
         time = t;
         compute_pressure(sol, pressure);
-        compute_theoretical_peak(theoretical_peak);
-        output_results(sol, pressure, theoretical_peak, step_number);
+        output_results(sol, pressure, step_number);
         write_csv_row(t, sol);
       };
 
-      // ====================================================================
-      // 6. SOLVE
-      // ====================================================================
+      // ---- solve -----------------------------------------------------------
       solution_dot = 0.0;
       time         = ida_parameters.initial_time;
       ida.solve_dae(solution, solution_dot);
+
       close_csv_files();
       compute_pressure(solution, pressure);
       compute_errors(cycle);

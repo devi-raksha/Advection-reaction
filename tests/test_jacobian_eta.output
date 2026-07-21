@@ -1,7 +1,8 @@
 
-DEAL::rest residual=2.14638e-14  pc=4.31382e-06
-DEAL::||residual with Pc|| = 4.31382e-06  (should be ~0 at equilibrium when terminal pressure is Pc = P_out )
-DEAL::J·ones (sum)  = -9.89638e+08
+DEAL::t=0.00000
+DEAL::rest residual=8.70234e-15  pc=8.47139e-05
+DEAL::||residual with Pc|| = 8.47139e-05  (should be ~0 at equilibrium when terminal pressure is Pc = P_out )
+DEAL::J·ones (sum)  = -5.89408e+07
 DEAL::expected      = 0.00000  (= Σ_cells (eta/a_d) · |K|)
 DEAL::mu            = 0.00000
 DEAL::xi            = 0.00000

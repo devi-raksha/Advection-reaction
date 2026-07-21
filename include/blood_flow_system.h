@@ -1,12 +1,17 @@
 #ifndef BLOOD_FLOW_SYSTEM_H
 #define BLOOD_FLOW_SYSTEM_H
 
+#include <deal.II/base/conditional_ostream.h>
 #include <deal.II/base/function.h>
 #include <deal.II/base/function_parser.h>
+#include <deal.II/base/index_set.h>
+#include <deal.II/base/mpi.h>
 #include <deal.II/base/parameter_acceptor.h>
 #include <deal.II/base/parsed_function.h>
 #include <deal.II/base/quadrature_lib.h>
 #include <deal.II/base/timer.h>
+
+#include <deal.II/distributed/fully_distributed_tria.h>
 
 #include <deal.II/dofs/dof_handler.h>
 #include <deal.II/dofs/dof_tools.h>
@@ -22,52 +27,86 @@
 
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
-#include <deal.II/lac/precondition.h>
+#include <deal.II/lac/generic_linear_algebra.h>
 #include <deal.II/lac/solver_control.h>
 #include <deal.II/lac/solver_gmres.h>
-#include <deal.II/lac/sparse_direct.h>
-#include <deal.II/lac/sparse_matrix.h>
-#include <deal.II/lac/sparsity_pattern.h>
+#include <deal.II/lac/sparsity_tools.h>
 #include <deal.II/lac/vector.h>
 
 #include <deal.II/numerics/data_out.h>
-#include <deal.II/numerics/matrix_tools.h>
 #include <deal.II/numerics/vector_tools.h>
 
-// #include <deal.II/sundials/arkode.h>
 #include <deal.II/sundials/ida.h>
 
 #include <array>
-#include <iosfwd>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <set>
 #include <utility>
+#include <vector>
 
 #include "constants.h"
 #include "function.h"
 
 using namespace dealii;
 
+// ---------------------------------------------------------------------------
+// Linear algebra backend.
+//
+// PETSc is picked when it is available and built with real scalars, unless
+// FORCE_USE_OF_TRILINOS asks for the other one.  Everything below is written
+// against the LA aliases, so the solver compiles unchanged either way; the two
+// places where the backends genuinely differ, the direct solver and the
+// AdditionalData of the preconditioners, are guarded by USE_PETSC_LA.
+// ---------------------------------------------------------------------------
+namespace LA
+{
+#if defined(DEAL_II_WITH_PETSC) && !defined(DEAL_II_PETSC_WITH_COMPLEX) && \
+  !(defined(DEAL_II_WITH_TRILINOS) && defined(FORCE_USE_OF_TRILINOS))
+  using namespace dealii::LinearAlgebraPETSc;
+#  define USE_PETSC_LA
+#elif defined(DEAL_II_WITH_TRILINOS)
+  using namespace dealii::LinearAlgebraTrilinos;
+#else
+#  error DEAL_II_WITH_PETSC or DEAL_II_WITH_TRILINOS required
+#endif
+} // namespace LA
+
 using BloodFlowParameters = ParsedTools::Constants;
+
+// ---------------------------------------------------------------------------
+// Distributed linear algebra types.
+//
+// Every unknown of the system is a DoF of `dof_handler` (components 0,1 carry
+// the cell values A, U; components 2,3 carry the face traces A_hat, U_hat),
+// with the sole exception of the RCR capacitor pressures, which occupy the
+// index range appended after dof_handler.n_dofs().  Ownership of an unknown is
+// consequently the ownership of the cell that carries it, as determined by the
+// Triangulation partitioning, and this class defines no second ownership rule.
+//
+// SUNDIALS::IDA is instantiated for both LA::MPI::Vector alternatives, so the
+// time integrator follows the backend choice without any further work.
+// ---------------------------------------------------------------------------
+using VectorType = LA::MPI::Vector;
+using MatrixType = LA::MPI::SparseMatrix;
 
 // ---------------------------------------------------------------------------
 // FaceTraceDof
 //
-// One (A_hat, U_hat) trace pair lives on every unique face of the mesh.
-// In 1-D (dim=1, spacedim=3) a "face" is a single vertex / 0-D object,
-// so there is exactly one quadrature point on it and one pair of scalar
-// unknowns per face.
+// One (A_hat, U_hat) trace pair lives on every unique face of the mesh.  In
+// 1-D (dim=1, spacedim=3) a face is a single vertex, so there is exactly one
+// quadrature point on it and one pair of scalar unknowns per face.
 //
-// face_key  = (CellId, local_face_number)   — canonical: the *lower* global
-//             cell-index side when the face is interior.
-// a_hat_dof = global DOF index of the area  trace unknown
-// u_hat_dof = global DOF index of the velocity trace unknown
+// The pair is addressed by the canonical face key (CellId, local_face_number),
+// where the canonical side of an interior face is the one whose CellId
+// compares less among the two neighbours.  Both indices are DoFs of the
+// FESystem, owned by the rank owning the canonical cell.
 // ---------------------------------------------------------------------------
 struct FaceTraceDof
 {
-  types::global_dof_index a_hat_dof;
-  types::global_dof_index u_hat_dof;
+  types::global_dof_index a_hat_dof = numbers::invalid_dof_index;
+  types::global_dof_index u_hat_dof = numbers::invalid_dof_index;
 };
 
 // ---------------------------------------------------------------------------
@@ -132,73 +171,102 @@ struct BloodFlowCopyData
 
 // ===========================================================================
 // Main class
+//
+// PARALLEL MODEL
+// --------------
+// The mesh is a parallel::fullydistributed::Triangulation built from a
+// description that is generated on a small number of group masters, so no rank
+// ever stores the entire fine mesh.  The ghost layer is the standard
+// vertex-adjacent one, which in 1-D means that a rank owning any cell incident
+// to a vertex also stores every other cell incident to that vertex.  Junction
+// coupling therefore never needs data beyond the locally relevant range.
+//
+// Assembly obeys a single rule: a rank writes exactly those rows of the
+// residual and of the Jacobian whose index it owns, and reads everything else
+// from ghosted vectors.  The rows of a junction with K incident vessels are
+// distributed over the incident half-faces rather than assigned to one owner:
+//
+//   row u_hat_i  : Riemann compatibility along vessel i,      i = 0 ... K-1
+//   row a_hat_0  : mass conservation over the whole junction
+//   row a_hat_i  : total-head continuity vessel 0 <-> i,      i = 1 ... K-1
+//
+// Each of these rows belongs to the rank owning vessel i's incident cell, and
+// that rank can read all K states from its ghost layer.  Every contribution is
+// consequently produced by exactly one rank and no reduction is needed to
+// close the junction equations.
 // ===========================================================================
 template <int dim, int spacedim = dim>
 class BloodFlowSystem : public ParameterAcceptor
 {
 public:
-  BloodFlowSystem();
+  BloodFlowSystem(const MPI_Comm comm = MPI_COMM_WORLD);
 
   void
   initialize_params(const std::string &filename = "");
+
+  // Read the VTK file on the group masters, distribute the resulting
+  // description, and broadcast the per-vessel and per-terminal data, which is
+  // small enough to be replicated on every rank.
+  void
+  create_triangulation();
+
   void
   setup_system();
 
-  // Build the face-trace DOF map and extend the solution vector.
-  // Must be called after dof_handler.distribute_dofs() inside setup_system.
+  // Register the canonical (A_hat, U_hat) pair of every face touched by a
+  // locally relevant cell, and collect the duplicate/canonical pairs that the
+  // trace continuity rows tie together.  Called after distribute_dofs().
   void
   build_face_dof_map();
 
   void
   detect_junctions();
+
   void
   initialize_terminal_capacitors();
-  void
-  update_terminal_pressures(const double          dt,
-                            const Vector<double> &evaluation_point);
 
-  // Residual F(t,y) for IDA(mplicit Differential-Algebraic solver) assembles
-  // cell + trace equations.
+  // Residual F(t,y) for IDA; assembles the cell, trace, junction, continuity
+  // and capacitor rows.
   void
-  assemble_residual(const double          t,
-                    const Vector<double> &y,
-                    const Vector<double> &ydot,
-                    Vector<double>       &residual);
+  assemble_residual(const double      t,
+                    const VectorType &y,
+                    const VectorType &ydot,
+                    VectorType       &residual);
 
-  // Jacobian ∂F/∂y — assembles all four blocks
-  // (cell–cell, cell–trace, trace–cell, trace–trace).
+  // Jacobian dF/dy + alpha * dF/dydot.
   void
-  assemble_jacobian(const double          t,
-                    const Vector<double> &y,
-                    const Vector<double> &ydot,
-                    double                alpha);
+  assemble_jacobian(const double      t,
+                    const VectorType &y,
+                    const VectorType &ydot,
+                    const double      alpha);
 
-  // Builds per_cell_mass_inv: the local M_K^-1 for every cell K and also stores
-  // mass matrix.
+  // Local mass matrices M_K and their inverses for every locally owned cell.
   void
   build_per_cell_mass_inv();
-  void
-  compute_initial_solution(Vector<double> &dst, const double t);
-  void
-  initialize_trace_unknowns(Vector<double> &sol, const double t);
 
   void
-  output_results(const Vector<double> &y,
-                 const Vector<double> &pressure_vec,
-                 const Vector<double> &theoretical_peak,
-                 unsigned int          cycle) const;
+  compute_initial_solution(VectorType &dst, const double t);
 
   void
-  compute_pressure(const Vector<double> &y, Vector<double> &pressure_vec) const;
+  initialize_trace_unknowns(VectorType &sol, const double t);
 
   void
-  compute_theoretical_peak(Vector<double> &theoretical_peak) const;
+  output_results(const VectorType  &y,
+                 const VectorType  &pressure_vec,
+                 const unsigned int cycle) const;
+
   void
-  compute_errors(unsigned int k);
+  compute_pressure(const VectorType &y, VectorType &pressure_vec) const;
+
+  void
+  compute_theoretical_peak(VectorType &theoretical_peak) const;
+
+  void
+  compute_errors(const unsigned int k);
+
   void
   run();
 
-  // Numerical flux type selector
   enum class NumericalFluxType
   {
     HLL,
@@ -219,9 +287,29 @@ public:
   }
 
 private:
+  using VertexKey = unsigned int;
+  using FaceKey   = std::pair<CellId, unsigned int>;
+
+  // -----------------------------------------------------------------------
+  // Parallel infrastructure
+  // -----------------------------------------------------------------------
+  MPI_Comm            mpi_communicator;
+  const unsigned int  n_mpi_processes;
+  const unsigned int  this_mpi_process;
+  ConditionalOStream  pcout;
+  mutable TimerOutput computing_timer;
+  SolverControl       direct_solver_control;
+
   // -----------------------------------------------------------------------
   // Physical parameters
   // -----------------------------------------------------------------------
+  std::map<FaceKey, FaceTraceDof> face_dof_map;
+
+  // VertexKey
+  // face_key(const typename DoFHandler<dim, spacedim>::active_cell_iterator
+  // &cell,
+  //          const unsigned int face_no) const;
+
   ParsedTools::Constants    par;
   AffineConstraints<double> constraints;
   double                    current_dt  = 0.0;
@@ -229,13 +317,19 @@ private:
 
   // -----------------------------------------------------------------------
   // Vessel / RCR physics (read from VTK)
+  //
+  // These maps are keyed by vessel id and boundary id, hold a handful of
+  // doubles each, and are replicated on every rank: the pressure law of a
+  // vessel is needed wherever one of its cells is locally relevant, and the
+  // arc-length bounds entering compute_a_d_local() are a property of the
+  // vessel as a whole rather than of the locally stored part of it.
   // -----------------------------------------------------------------------
   struct VesselPhysicalProperties
   {
     double a0, r_d, a_d, E, h_wall, p_d, p0, L;
-    // define inlet and outlet radii for tapered vessels.
-    // if r_in = r_out (or both zero), the vessel is treated as uniform.
-    // and a_d is used as the default area for the pressure law.
+    // Inlet and outlet radii for tapered vessels.  If r_in == r_out (or both
+    // are zero) the vessel is uniform and a_d is used as the reference area of
+    // the pressure law.
     double r_in = 0.0, r_out = 0.0;
   };
   std::map<unsigned int, VesselPhysicalProperties> vessel_map;
@@ -246,70 +340,135 @@ private:
   };
   std::map<unsigned int, RCRPhysics>   rcr_map;
   std::map<unsigned int, unsigned int> vid_to_rcr_vertex; // key = vessel id
-                                                          // key = vessel id
   std::map<types::boundary_id, double> terminal_Pc_storage;
   std::set<types::boundary_id>         terminal_boundary_ids;
 
-  // Raw VTK cell/point data arrays
+  // Global arc-length extent [s_min, s_max] of every vessel, obtained by
+  // reducing the locally stored cell centres over the communicator.
+  std::map<unsigned int, std::pair<double, double>> vessel_s_bounds;
+
+  // Raw VTK cell/point data arrays, indexed by the serial cell/vertex
+  // numbering of the file and read on the group masters only.
   Vector<double> cell_vessel_ids, cell_a0, cell_r_d, cell_a_d, cell_E;
   Vector<double> cell_h_wall, cell_p_d, cell_p0, cell_L;
   Vector<double> cell_r_in, cell_r_out;
   Vector<double> point_boundary_id, point_R1, point_R2, point_C, point_P_out;
 
-  // -----------------------------------------------------------------------
-  // Mesh and FE spaces (cell unknowns only — DGQ)
-  // -----------------------------------------------------------------------
-  Triangulation<dim, spacedim>                  triangulation;
-  DoFHandler<dim, spacedim>                     dof_handler;
-  std::unique_ptr<FiniteElement<dim, spacedim>> fe;
+  // Fill vessel_map, rcr_map, terminal_boundary_ids and vessel_s_bounds so
+  // that they describe the whole network on every rank.
+  void
+  build_global_vessel_data();
 
   // -----------------------------------------------------------------------
-  // Face-trace DOF management
+  // Mesh and FE space
   //
-  // face_dof_map_:  (CellId, local_face_no) -> FaceTraceDof
+  //   FESystem( FE_DGQ(fe_degree), 2,   -> components 0,1 : cell  A, U
+  //             FE_DGQ(1),        2 )   -> components 2,3 : trace A_hat, U_hat
   //
-  //   * For interior faces the key uses the cell whose CellId compares
-  //     *less* among the two neighbours — canonical ordering guarantees
-  //     uniqueness without needing a separate "processed" set.
-  //   * For boundary faces and junction faces, the unique cell owning
-  //     that face edge is used directly.
-  //
-  // n_cell_dofs_  : dof_handler.n_dofs()   (A,U per DGQ cell)
-  // n_trace_dofs_ : 2 * (number of unique faces)
-  // n_total_dofs_ : n_cell_dofs_ + n_trace_dofs_
-  //
-  // Solution vector layout:  [ cell block | trace block ]
-  //                           0 …n_cell-1   n_cell … n_total-1
+  // Solution vector layout: [ FE range | capacitor pressures ], the FE range
+  // being numbered by dof_handler and the capacitor block occupying the
+  // n_rcr_dofs indices starting at dof_handler.n_dofs().
   // -----------------------------------------------------------------------
-  std::map<std::pair<CellId, unsigned int>, FaceTraceDof> face_dof_map;
+  parallel::fullydistributed::Triangulation<dim, spacedim> triangulation;
+  DoFHandler<dim, spacedim>                                dof_handler;
+  std::unique_ptr<FiniteElement<dim, spacedim>>            fe;
 
-  types::global_dof_index n_cell_dofs  = 0;
-  types::global_dof_index n_trace_dofs = 0;
   types::global_dof_index n_total_dofs = 0;
 
-  // Capacitor pressures as differential DAE unknowns(one per RCR terminal with
-  // C > 0)
+  // -----------------------------------------------------------------------
+  // Index sets
+  //
+  // The *_fe_dofs sets span the FE range only, sized dof_handler.n_dofs(), as
+  // required by FEValues::get_function_values().  The unqualified sets span
+  // the full system, sized n_total_dofs.
+  //
+  // cell_dofs_owned and trace_dofs_owned come from DoFTools::extract_dofs()
+  // with a ComponentMask, and hence identify the differential and the
+  // algebraic rows of the DAE irrespective of any renumbering.
+  // -----------------------------------------------------------------------
+  IndexSet locally_owned_dofs;
+  IndexSet locally_relevant_dofs;
+  IndexSet locally_owned_fe_dofs;
+  IndexSet locally_relevant_fe_dofs;
+  IndexSet cell_dofs_owned;  // components 0,1 : differential rows
+  IndexSet trace_dofs_owned; // components 2,3 : algebraic rows
+  IndexSet rcr_dofs_owned;   // capacitor rows owned by this rank
 
+  // -----------------------------------------------------------------------
+  // Trace continuity
+  //
+  // Each cell carries its own (A_hat, U_hat) at every face.  On an ordinary
+  // interior face the two sides are tied together: the canonical side is
+  // registered in face_dof_map and carries the Riemann equation, while the
+  // opposite side is slaved by the algebraic rows
+  //     A_hat_dup - A_hat_canon = 0 ,   U_hat_dup - U_hat_canon = 0 .
+  // Junction and boundary half-faces are each their own canonical owner and
+  // are untouched by this mechanism.
+  //
+  // A pair is stored on the rank owning the duplicate side, which is the rank
+  // that owns the two rows; the canonical indices are read from the ghosted
+  // solution.
+  // -----------------------------------------------------------------------
+  struct TraceContinuityPair
+  {
+    types::global_dof_index a_dup, u_dup;     // slaved (duplicate) side
+    types::global_dof_index a_canon, u_canon; // master (canonical) side
+  };
+  std::vector<TraceContinuityPair> trace_continuity_pairs;
+
+  // Return the two global trace DoFs (component 2 -> A_hat, component 3 ->
+  // U_hat) with support on local face `f`, given a cell's local dof indices.
+  // In 1-D, FE_DGQ(1) has exactly one such DoF per component per face.
+  std::pair<types::global_dof_index, types::global_dof_index>
+  face_trace_dofs(const std::vector<types::global_dof_index> &ldofs,
+                  const unsigned int                          f) const
+  {
+    types::global_dof_index a = numbers::invalid_dof_index;
+    types::global_dof_index u = numbers::invalid_dof_index;
+    for (unsigned int i = 0; i < fe->n_dofs_per_cell(); ++i)
+      {
+        const unsigned int c = fe->system_to_component_index(i).first;
+        if ((c == 2 || c == 3) && fe->has_support_on_face(i, f))
+          (c == 2 ? a : u) = ldofs[i];
+      }
+    return {a, u};
+  }
+
+  // -----------------------------------------------------------------------
+  // Capacitor pressures as differential DAE unknowns, one per RCR terminal
+  // with C > 0.
+  //
+  // The terminal boundary ids are global data, so every rank enumerates the
+  // capacitor block identically.  A given Pc index is owned by the rank owning
+  // the unique cell holding that terminal face, so its row is always assembled
+  // locally.
+  // -----------------------------------------------------------------------
   std::map<types::boundary_id, types::global_dof_index> rcr_pc_dof;
   types::global_dof_index                               n_rcr_dofs = 0;
-  types::global_dof_index n_trace_end = 0; // = n_cell_dofs + n_trace_dofs
+
   void
   build_rcr_dof_map();
+
   void
-  assemble_rcr_capacitor_equations(const Vector<double> &y,
-                                   const Vector<double> &ydot,
-                                   Vector<double>       &F);
+  assemble_rcr_capacitor_equations(const VectorType &y,
+                                   const VectorType &ydot,
+                                   VectorType       &F);
+
   void
-  assemble_jacobian_rcr_capacitor_block(const Vector<double> &y);
+  assemble_jacobian_rcr_capacitor_block(const VectorType &y);
 
   // -----------------------------------------------------------------------
   // Junction detection
   //
-  // A junction is a mesh vertex touched by more than or equal to two cells
-  // having different vessel IDs. all_junction_faces holds (CellId,
-  // local_face_no) for every half-face that ends at a junction vertex — used to
-  // skip those faces in the ordinary boundary-condition assembly so they are
-  // handled exclusively by assemble_trace_junction_equations().
+  // A junction is a mesh vertex touched by two or more cells having different
+  // vessel ids.  all_junction_faces holds (CellId, local_face_no) for every
+  // half-face ending at a junction vertex, and is used to skip those faces in
+  // the ordinary boundary-condition assembly so that they are handled
+  // exclusively by assemble_trace_junction_equations().
+  //
+  // Detection runs over the locally relevant cells.  Since the ghost layer is
+  // vertex-adjacent, a rank incident to a junction sees all of its half-faces,
+  // and the list of junctions it builds is complete for every row it owns.
   // -----------------------------------------------------------------------
   struct JunctionHalfFace
   {
@@ -322,6 +481,7 @@ private:
   {
     Point<spacedim>               location;
     std::vector<JunctionHalfFace> half_faces; // one entry per incident vessel
+
     unsigned int
     n_vessels() const
     {
@@ -332,26 +492,93 @@ private:
   std::vector<JunctionInfo>                 junctions;
   std::set<std::pair<CellId, unsigned int>> all_junction_faces;
 
+  // ----------------------------------------------------------------------
+  // If true, a valence-2 node joining two different vessel ids is demoted to
+  // an ordinary interior face: it then carries a single trace pair, exactly
+  // like an inflow, outflow or interior face, with the far side slaved by the
+  // continuity rows.
+  //
+  // PHYSICS GATE: this is equivalent to the K=2 junction equations only when
+  // both vessels share the same pressure law p(A).  If they differ, forcing
+  // A_hat_L = A_hat_R satisfies mass conservation but violates total-pressure
+  // continuity  p_L(A) + rho/2 U^2 = p_R(A) + rho/2 U^2.  detect_junctions()
+  // checks this and refuses to demote, with a warning, when the laws differ.
+  // ----------------------------------------------------------------------
+  bool unify_two_way_junctions = false;
+
+  // Do the two vessels share an identical pressure law?
+  bool
+  two_way_pressure_laws_match(const unsigned int vid_a,
+                              const unsigned int vid_b) const
+  {
+    if (!vessel_map.count(vid_a) || !vessel_map.count(vid_b))
+      return false;
+    const auto &A  = vessel_map.at(vid_a);
+    const auto &B  = vessel_map.at(vid_b);
+    const auto  eq = [](const double x, const double y) {
+      return std::abs(x - y) <=
+             1e-10 * std::max(1.0, std::max(std::abs(x), std::abs(y)));
+    };
+    return eq(A.a0, B.a0) && eq(A.a_d, B.a_d) && eq(A.E, B.E) &&
+           eq(A.h_wall, B.h_wall) && eq(A.p0, B.p0) && eq(A.p_d, B.p_d) &&
+           eq(A.r_in, B.r_in) && eq(A.r_out, B.r_out);
+  }
+
   // -----------------------------------------------------------------------
-  // Linear algebra  (sized to n_total_dofs)
+  // Linear algebra
   // -----------------------------------------------------------------------
-  SparsityPattern      sparsity_pattern;
-  SparseMatrix<double> jacobian_matrix;
-  SparseMatrix<double> linear_system_matrix;
-  SparseDirectUMFPACK  linear_solver;
+  MatrixType jacobian_matrix;
+  MatrixType linear_system_matrix;
 
-  // Per-cell inverse mass matrices.
-  // The system seen by ARKode is the pure ODE
-  //   dy_cell/dt = M_K^-1 * F_cell(y)     (cell block)
-  //   0           = F_trace(y)             (trace block, algebraic)
+  // The direct solver is the one object with no common alias in the LA
+  // namespace: PETSc reaches MUMPS through SparseDirectMUMPS, Trilinos reaches
+  // Amesos through SolverDirect.  Both are constructed from a SolverControl
+  // and solve through solve(A, x, b), so only the declaration differs.
 
-  std::map<CellId, FullMatrix<double>> per_cell_mass_inv;
-  std::map<CellId, FullMatrix<double>> per_cell_mass_;
+#ifdef USE_PETSC_LA
+  std::unique_ptr<PETScWrappers::SparseDirectMUMPS> direct_solver;
+#else
+  std::unique_ptr<TrilinosWrappers::SolverDirect> direct_solver;
+#endif
 
-  Vector<double> solution;
-  Vector<double> solution_dot;
-  Vector<double> pressure;
-  Vector<double> theoretical_peak;
+  // Preconditioner for the iterative path.  Note that PETSc's PCILU is a
+  // single-rank preconditioner: with more than one process, initialize() it
+  // through a block-Jacobi outer level or fall back to PreconditionAMG.
+  std::unique_ptr<LA::MPI::PreconditionILU> ilu_preconditioner;
+
+  // Per-cell mass matrices, indexed by cell->active_cell_index(): deal.II
+  // numbers the locally stored active cells contiguously, so no CellId lookup
+  // is needed in the residual inner loop.  Only locally owned entries are
+  // filled.
+  std::vector<FullMatrix<double>> per_cell_mass_inv;
+  std::vector<FullMatrix<double>> per_cell_mass;
+
+  VectorType solution;
+  VectorType solution_dot;
+  VectorType pressure;
+  VectorType theoretical_peak;
+
+  // -----------------------------------------------------------------------
+  // Ghosted read vectors.
+  //
+  // All assembly reads go through these and all assembly writes go to a
+  // non-ghosted vector followed by compress(), which is the only communication
+  // in the whole assembly.
+  //
+  //   y_relevant    : full system, for direct y[dof] reads of trace and
+  //                   capacitor unknowns.
+  //   y_fe_relevant : FE range only, as required by
+  //                   FEValues::get_function_values(), which asserts that the
+  //                   vector has size dof_handler.n_dofs().
+  //   y_fe_owned    : scratch used to build y_fe_relevant.
+  // -----------------------------------------------------------------------
+  mutable VectorType y_relevant;
+  mutable VectorType y_fe_relevant;
+  mutable VectorType y_fe_owned;
+  VectorType         residual_F;
+
+  void
+  update_ghosted_vectors(const VectorType &y) const;
 
   // -----------------------------------------------------------------------
   // User parameters
@@ -370,38 +597,43 @@ private:
   std::string  outlet_type;
   double       theta    = 0.5;
   double       theta_bd = 0.5;
-  double       time     = 0.0;
+  double gamma = 1; // 0.5*gamma*(U^2) term in total pressure continuity at
+                    // junctions chnage only for 56 arteries <= 0.8
+  double time = 0.0;
 
   NumericalFluxType numerical_flux_type     = NumericalFluxType::HLL;
   std::string       numerical_flux_type_str = "HLL";
 
-  SUNDIALS::IDA<Vector<double>>::AdditionalData ida_parameters;
+  SUNDIALS::IDA<VectorType>::AdditionalData ida_parameters;
 
   ParsedTools::Function<spacedim> rhs_function;
   ParsedTools::Function<spacedim> exact_solution;
   ParsedTools::Function<1>        inflow_function;
 
-  mutable TimerOutput computing_timer;
-
-
-  // CSV timeseries output for each vessel
-  std::map<unsigned int, std::ofstream> csv_vessel_;
+  // -----------------------------------------------------------------------
+  // CSV time-series output, one file per vessel.
+  //
+  // A probe is opened only on the rank owning the probed cell, so each file is
+  // written by exactly one rank and no output is duplicated.
+  // -----------------------------------------------------------------------
+  std::map<unsigned int, std::ofstream> csv_vessel;
   std::vector<
     std::pair<unsigned int,
               typename DoFHandler<dim, spacedim>::active_cell_iterator>>
-    probe_targets_;
+    probe_targets;
+
   void
   open_csv_files();
   void
-  write_csv_row(const double t, const Vector<double> &sol);
+  write_csv_row(const double t, const VectorType &sol);
   void
   close_csv_files();
+
   // -----------------------------------------------------------------------
   // Internal helpers — geometry
   // -----------------------------------------------------------------------
-
   bool
-  is_terminal_boundary(types::boundary_id bid) const
+  is_terminal_boundary(const types::boundary_id bid) const
   {
     return terminal_boundary_ids.count(bid) > 0;
   }
@@ -432,12 +664,12 @@ private:
   // Internal helpers — physics / constitutive law
   // -----------------------------------------------------------------------
 
-  // Compute the local diastolic cross-sectional area at a cell's centroid
-  // by linearly interpolating in arc-length between r_in (inlet) and
-  // r_out (outlet) of the parent vessel.
+  // Local diastolic cross-sectional area at a cell's centroid, obtained by
+  // interpolating linearly in arc length between the inlet radius r_in and the
+  // outlet radius r_out of the parent vessel.  The arc-length bounds are the
+  // global ones, so the value a cell gets does not depend on the partitioning.
   //
   // If r_in == r_out == 0 (no taper data), fall back to the vessel-level a_d.
-
   double
   compute_a_d_local(
     const typename DoFHandler<dim, spacedim>::active_cell_iterator &cell) const
@@ -484,11 +716,10 @@ private:
   double
   compute_beta_p(const double E, const double h_wall) const
   {
-    return (4.0 * std::sqrt(3.14159265358979323846) / 3.0) * E * h_wall;
+    return (4.0 * std::sqrt(numbers::PI) / 3.0) * E * h_wall;
   }
 
-
-  // ---- Physics helpers taking explicit a_d_local (preferred call-sites) ----
+  // ---- Physics helpers taking an explicit a_d_local ------------------------
 
   double
   compute_pressure_value(const double       A,
@@ -531,7 +762,7 @@ private:
            (2.0 * A_safe);
   }
 
-  // ---- Cell-iterator convenience wrappers (compute a_d_local internally) ---
+  // ---- Cell-iterator wrappers (compute a_d_local internally) ---------------
 
   double
   compute_pressure_value(
@@ -571,9 +802,7 @@ private:
                                          compute_a_d_local(cell));
   }
 
-  // Convenience wrappers for face-trace access (
-  //      compatibility with junctions and boundary conditions where we only
-  //      have a vid, not a cell iterator) ------------------------------------
+  // ---- Wrappers for call sites that only have a vessel id ------------------
 
   double
   compute_pressure_value(const double A, const unsigned int vid) const
@@ -599,24 +828,25 @@ private:
     return compute_wave_speed_derivative(A, vid, vessel_map.at(vid).a_d);
   }
 
-
   // -----------------------------------------------------------------------
   // Internal helpers — face-trace access
   // -----------------------------------------------------------------------
 
-  // Return the canonical key for a face.  For interior faces the cell
-  // with the lexicographically smaller CellId is always the key owner.
+  // Canonical key of a face.  For interior faces the cell with the
+  // lexicographically smaller CellId owns the key.  CellId comparison is
+  // partitioning independent, so all ranks agree on the canonical side of a
+  // face straddling a subdomain boundary.
   std::pair<CellId, unsigned int>
   canonical_face_key(
     const typename DoFHandler<dim, spacedim>::active_cell_iterator &cell,
     const unsigned int face_no) const;
-  std::map<unsigned int, std::pair<double, double>> vessel_s_bounds;
-  // Read (A_hat, U_hat) from the trace block of y.
+
+  // Read (A_hat, U_hat) from a ghosted vector.
   void
   get_face_trace(
-    const Vector<double>                                           &y,
+    const VectorType                                               &y,
     const typename DoFHandler<dim, spacedim>::active_cell_iterator &cell,
-    unsigned int                                                    face_no,
+    const unsigned int                                              face_no,
     double                                                         &A_hat,
     double &U_hat) const;
 
@@ -652,7 +882,7 @@ private:
 
   double
   scalar_momentum_flux_jac(const double bn,
-                           const double c2_over_A, // 1/rho dp/da = c^2/A
+                           const double c2_over_A, // 1/rho dp/dA = c^2/A
                            const double U,
                            const double dA,
                            const double dU) const
@@ -707,7 +937,6 @@ private:
                unsigned int vid_R,
                double /*a_d_L*/,
                double a_d_R) const;
-
 
   std::array<double, 2>
   lf_flux(double       bn_L,
@@ -781,8 +1010,6 @@ private:
                    unsigned int vid_R,
                    const double /*a_d_L*/,
                    const double a_d_R) const;
-
-
 
   std::array<double, 2>
   lf_flux_jac(double       bn_L,
@@ -871,44 +1098,70 @@ private:
 
   // -----------------------------------------------------------------------
   // Assembly sub-routines
+  //
+  // Each routine loops over the locally owned cells (or over the locally
+  // relevant ones and guards on row ownership, where the coupling requires
+  // it), reads from the ghosted vectors, and writes only rows it owns.  The
+  // caller closes the write with a single compress().
   // -----------------------------------------------------------------------
 
-  // Cell residuals: volume integrals + flux through face traces.
+  // Cell residuals: volume integrals plus flux through the face traces.
   void
-  assemble_cell_residuals(const double          t,
-                          const Vector<double> &y,
-                          Vector<double>       &F);
+  assemble_cell_residuals(const double t, const VectorType &y, VectorType &F);
 
   // Trace equations for interior faces (Riemann-invariant continuity).
   void
-  assemble_trace_interior_equations(const Vector<double> &y, Vector<double> &F);
+  assemble_trace_interior_equations(const VectorType &y, VectorType &F);
 
   // Trace equations for boundary faces (inflow Q / RCR / reflection).
   void
-  assemble_trace_boundary_equations(const double          t,
-                                    const Vector<double> &y,
-                                    Vector<double>       &F);
+  assemble_trace_boundary_equations(const double      t,
+                                    const VectorType &y,
+                                    VectorType       &F);
 
-  // Trace equations for junction faces (mass conservation +
-  // tottotalal-head continuity + Riemann compatibility per vessel).
+  // Trace equations for junction faces (mass conservation, total-head
+  // continuity, and Riemann compatibility per vessel).
   void
-  assemble_trace_junction_equations(const Vector<double> &y, Vector<double> &F);
+  assemble_trace_junction_equations(const VectorType &y, VectorType &F);
+
+  // Continuity rows for the duplicate side of each ordinary interior face:
+  // F[a_dup] = A_hat_dup - A_hat_canon, likewise for U.
+  void
+  assemble_trace_continuity_equations(const VectorType &y, VectorType &F);
 
   // Jacobian blocks
   void
-  assemble_jacobian_cell_block(const double t, const Vector<double> &y);
+  assemble_jacobian_cell_block(const double t, const VectorType &y);
 
   void
-  assemble_jacobian_trace_interior_block(const Vector<double> &y);
+  assemble_jacobian_trace_interior_block(const VectorType &y);
 
   void
-  assemble_jacobian_trace_boundary_block(const double          t,
-                                         const Vector<double> &y);
+  assemble_jacobian_trace_boundary_block(const double t, const VectorType &y);
 
   void
-  assemble_jacobian_trace_junction_block(const Vector<double> &y);
+  assemble_jacobian_trace_junction_block(const VectorType &y);
 
-  // Mass matrix - only acts on the cell block; trace block rows/cols = 0.
+  void
+  assemble_jacobian_trace_continuity_block();
+
+  // -----------------------------------------------------------------------
+  // Sparsity
+  //
+  // The pattern is built as a DynamicSparsityPattern over the locally relevant
+  // rows and then reduced with SparsityTools::distribute_sparsity_pattern(),
+  // so that every rank ends up knowing the entries of the rows it owns.
+  // -----------------------------------------------------------------------
+  void
+  build_cell_sparsity(DynamicSparsityPattern &dsp);
+  void
+  build_trace_sparsity(DynamicSparsityPattern &dsp);
+  void
+  build_junction_sparsity(DynamicSparsityPattern &dsp);
+  void
+  build_rcr_sparsity(DynamicSparsityPattern &dsp);
+  void
+  build_trace_continuity_sparsity(DynamicSparsityPattern &dsp);
   void
   build_extended_sparsity_pattern();
 

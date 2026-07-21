@@ -2,7 +2,7 @@
  *
  *  SPDX-License-Identifier: LGPL-2.1-or-later
  *  Copyright:
- *      2025  Your Name or Institution
+ *  2024-2025 by the deal.II authors
  *
  *  This file is part of the blood-flow example built on the deal.II library.
  *  It provides the top-level executable that steers the templated
@@ -14,6 +14,7 @@
  */
 
 #include <deal.II/base/logstream.h> // deallog control
+#include <deal.II/base/mpi.h>
 #include <deal.II/base/parameter_handler.h>
 
 #include <iostream>
@@ -28,6 +29,7 @@ main(int argc, char **argv)
 {
   try
     {
+      Utilities::MPI::MPI_InitFinalize mpi_initialization(argc, argv, 1);
       /* --------------------------- 1. Locate parameter file -----------------
        */
       std::string par_name;

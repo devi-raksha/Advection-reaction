@@ -1,5 +1,19 @@
 // ---------------------------------------------------------------------
 //
+// Copyright (C) 2024 by Luca Heltai
+//
+// This file is part of the bare-dealii-app application, based on the
+// deal.II library.
+//
+// The bare-dealii-app application is free software; you can use it,
+// redistribute it, and/or modify it under the terms of the Apache-2.0 License
+// WITH LLVM-exception as published by the Free Software Foundation; either
+// version 3.0 of the License, or (at your option) any later version.
+// The full text of the license can be found in the file LICENSE.md
+// at the top level of the bare-dealii-app distribution.
+//
+// ---------------------------------------------------------------------
+
 // Jacobian applied to a constant perturbation at the trivial equilibrium.
 //
 // At the diastolic equilibrium produced by compute_initial_solution(),
@@ -10,19 +24,20 @@
 // purely uniform (non-derivative) sensitivity is the friction source
 //   R_U += -eta * U/A * phi_u,   eta = 2 * (xi+2) * pi * mu / rho
 //
-// Since assemble_jacobian returns J_IDA = ∂F/∂y + α·M, with
+// Since assemble_jacobian returns J_IDA = ∂F/∂y + alpha·M, with
 //   F_cell = M·ẏ − R_cell  ⇒  ∂F/∂y = −∂R/∂y,
 // the dot-product (J·ones, ones)_{R^N} on the U-block evaluates to
 //
-//     sum_Jdw_U  =  +eta / a_d · |Ω|
+//     sum_Jdw_U  =  +eta / a_d · |omega|
 //
 // (the sign is positive because R has −eta·U/A, and ∂F/∂y has a
-//  second sign flip). With μ = 0 this should be ~0 up to FD/roundoff.
+//  second sign flip). With \mu = 0 this should be ~0 up to FD/roundoff.
 // ---------------------------------------------------------------------
+#include <deal.II/base/mpi.h>
 
 #include <deal.II/grid/grid_in.h>
 
-#include <deal.II/lac/vector.h>
+#include <deal.II/lac/petsc_vector.h>
 
 #include <cmath>
 #include <iomanip>
@@ -37,140 +52,155 @@ void
 test()
 {
   BloodFlowSystem<1, 3> problem;
-  problem.initialize_params(PRM_DIR "aortic.prm");
+  problem.initialize_params(PRM_DIR "constant.prm");
 
-  // ── same setup as the equilibrium test ───────────────────────────────────
-  dealii::GridIn<1, 3> grid_in;
-  grid_in.attach_triangulation(problem.triangulation);
-  std::ifstream mesh_file(problem.vtk_file_path);
-  grid_in.read_vtk(mesh_file);
+  // initialize_params() resets deallog depth according to the parameter file.
+  deallog.depth_console(10);
+  deallog.depth_file(10);
 
-  VTKUtils::read_cell_data(problem.vtk_file_path,
-                           "vessel_id",
-                           problem.cell_vessel_ids);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "a0", problem.cell_a0);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "a_d", problem.cell_a_d);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "E", problem.cell_E);
-  VTKUtils::read_cell_data(problem.vtk_file_path,
-                           "h_wall",
-                           problem.cell_h_wall);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "p_d", problem.cell_p_d);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "p0", problem.cell_p0);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "L", problem.cell_L);
-  VTKUtils::read_cell_data(problem.vtk_file_path, "r_d", problem.cell_r_d);
-
-  VTKUtils::read_vertex_data(problem.vtk_file_path,
-                             "boundary_id",
-                             problem.point_boundary_id);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "R1", problem.point_R1);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "R2", problem.point_R2);
-  VTKUtils::read_vertex_data(problem.vtk_file_path, "C", problem.point_C);
-  VTKUtils::read_vertex_data(problem.vtk_file_path,
-                             "P_out",
-                             problem.point_P_out);
-
-  {
-    unsigned int idx = 0;
-    for (auto &cell : problem.triangulation.active_cell_iterators())
-      {
-        cell->set_material_id(
-          static_cast<unsigned int>(problem.cell_vessel_ids[idx]));
-        for (unsigned int f = 0; f < GeometryInfo<1>::faces_per_cell; ++f)
-          if (cell->face(f)->at_boundary())
-            {
-              const unsigned int v = cell->face(f)->vertex_index(0);
-              cell->face(f)->set_boundary_id(
-                static_cast<types::boundary_id>(problem.point_boundary_id[v]));
-            }
-        ++idx;
-      }
-  }
-
-  for (const auto &cell : problem.triangulation.active_cell_iterators())
-    for (unsigned int f = 0; f < GeometryInfo<1>::faces_per_cell; ++f)
-      if (cell->face(f)->at_boundary())
-        {
-          const types::boundary_id          bid = cell->face(f)->boundary_id();
-          const unsigned int                v = cell->face(f)->vertex_index(0);
-          BloodFlowSystem<1, 3>::RCRPhysics rcr;
-          rcr.R1    = problem.point_R1[v];
-          rcr.R2    = problem.point_R2[v];
-          rcr.C     = problem.point_C[v];
-          rcr.P_out = problem.point_P_out[v];
-          if (rcr.R2 > 0.0)
-            problem.rcr_map[bid] = rcr;
-        }
-
-  problem.triangulation.refine_global(problem.n_global_refinements);
+  problem.create_triangulation();
   problem.setup_system();
+
   problem.initialize_terminal_capacitors();
   problem.build_per_cell_mass_inv();
-  problem.compute_initial_solution(problem.solution, problem.time);
 
-  // ── Evaluate residual and Jacobian at the equilibrium ────────────────────
-  const double t     = 0.0;
-  const double alpha = 0.0; // 0 → matrix equals ∂F/∂y (no α·M term)
+  problem.compute_initial_solution(problem.solution,
+                                   problem.ida_parameters.initial_time);
 
-  Vector<double> ydot(problem.solution.size());
+  problem.initialize_trace_unknowns(problem.solution,
+                                    problem.ida_parameters.initial_time);
+
+  problem.time = problem.ida_parameters.initial_time;
+
+  const double t     = problem.time;
+  const double alpha = 0.0; // 0 → matrix equals ∂F/∂y (no alpha·M term)
+
+  // residual/ydot/ones/Jdw must be the same VectorType assemble_residual,
+  // assemble_jacobian, and jacobian_matrix.vmult() all expect
+  // (PETScWrappers::MPI::Vector), and NOT ghosted: assemble_residual and
+  // assemble_jacobian each call update_ghosted_vectors(y) internally to
+  // build their own ghosted read copy from y, so y/ydot/residual here are
+  // the plain, locally-owned-only vectors those functions are actually
+  // written against -- the same shape IDA itself hands them at runtime.
+
+  VectorType ydot(problem.locally_owned_dofs, problem.mpi_communicator);
   ydot = 0.0;
 
-  Vector<double> residual(problem.solution.size());
+  VectorType residual(problem.locally_owned_dofs, problem.mpi_communicator);
+
+  // ── Evaluate residual and Jacobian at the equilibrium ────────────────────
+  // assemble_jacobian() resets jacobian_matrix to zero and reassembles every
+  // block itself (including the trace/junction one), so there's no need to
+  // separately zero it, call update_ghosted_vectors(), or pre-assemble any
+  // one block by hand beforehand -- doing so here would just be discarded
+  // work with no effect on the final matrix.
   problem.assemble_residual(t, problem.solution, ydot, residual);
   problem.assemble_jacobian(t, problem.solution, ydot, alpha);
 
-  double pc_sq = 0, rest_sq = 0;
-  for (unsigned int i = 0; i < residual.size(); ++i)
-    (i >= problem.n_trace_end ? pc_sq : rest_sq) += residual[i] * residual[i];
-  deallog << "rest residual=" << std::sqrt(rest_sq)
-          << "  pc=" << std::sqrt(pc_sq) << std::endl;
-  deallog
-    << "||residual with Pc|| = " << residual.l2_norm()
-    << "  (should be ~0 at equilibrium when terminal pressure is Pc = P_out )"
-    << std::endl;
+  // Sum of squares over LOCALLY OWNED rows only, then reduced across ranks.
+  // A parallel PETSc vector only allows direct indexing for entries this
+  // rank owns (or holds as a ghost); looping the full global range with
+  // operator[] on every rank, as the serial version did, isn't valid here,
+  // and summing beyond locally_owned_dofs would double-count anything also
+  // visible as a ghost. There's no member named n_trace_end on
+  // BloodFlowSystem (it doesn't exist -- checked against the header); the
+  // actual FE/capacitor boundary the header documents is
+  // dof_handler.n_dofs(): rows before it are the cell (differential) and
+  // trace (algebraic) unknowns, rows at or after it are the RCR capacitor
+  // pressures.
+  const types::global_dof_index first_pc    = problem.dof_handler.n_dofs();
+  double                        pc_sq_local = 0.0, rest_sq_local = 0.0;
+  for (const auto i : problem.locally_owned_dofs)
+    (i >= first_pc ? pc_sq_local : rest_sq_local) += residual(i) * residual(i);
+
+  const double rest_sq =
+    Utilities::MPI::sum(rest_sq_local, problem.mpi_communicator);
+  const double pc_sq =
+    Utilities::MPI::sum(pc_sq_local, problem.mpi_communicator);
+
+  // residual.l2_norm(), unlike the manual split above, is a built-in PETSc
+  // vector operation and is already a proper MPI-collective reduction --
+  // it needs no manual sum, and is identical on every rank already.
+  const double residual_l2_norm = residual.l2_norm();
 
   // ── J · ones, dot with ones ──────────────────────────────────────────────
-  Vector<double> ones(problem.solution.size());
+  VectorType ones(problem.locally_owned_dofs, problem.mpi_communicator);
   ones = 1.0;
-  Vector<double> Jdw(problem.solution.size());
+  VectorType Jdw(problem.locally_owned_dofs, problem.mpi_communicator);
   problem.jacobian_matrix.vmult(Jdw, ones);
 
+  // Vector::operator* (the dot product) is also a built-in PETSc collective
+  // operation and already returns the correct, identical global value on
+  // every rank -- again no manual reduction needed.
   const double sum_Jdw = Jdw * ones;
 
   // ── Expected value ───────────────────────────────────────────────────────
   // Only the friction term contributes a "uniform sensitivity":
-  //   ∂R_U/∂U  contains  -eta/A · ∫ φ_u φ_u dx   (eta = 2(ξ+2)πμ/ρ)
+  //   ∂R_U/∂U  contains  -eta/A · ∫ φ_u φ_u dx   (eta = 2(ξ+2)π\mu/ρ)
   // Through ∂F/∂y = -∂R/∂y and the partition-of-unity sum over shape
   // functions, this yields +eta/A · |Ω| in (J·ones, ones).
   // a_d is per-vessel (via vessel_map), preserved across refinement since
   // it's keyed by cell->material_id().
-  double expected = 0.0;
+  double expected_local = 0.0;
   {
     const double rho = problem.par["rho"];
     const double mu  = problem.par["mu"];
     const double xi  = problem.par["xi"];
     const double eta = 2.0 * (xi + 2.0) * numbers::PI * mu / rho;
 
+    // Restricted to locally owned cells: the triangulation is a fully
+    // distributed one here, so each cell exists on exactly one rank (plus
+    // possibly as a ghost elsewhere) -- unlike the mesh-wide metadata setup
+    // in create_triangulation(), this is an integral, and every cell must
+    // be counted exactly once, so the is_locally_owned() restriction is
+    // correct. What was missing is reducing the resulting partial sums
+    // across ranks before printing.
     for (const auto &cell : problem.triangulation.active_cell_iterators())
       {
+        if (!cell->is_locally_owned())
+          continue;
         const unsigned int vid      = cell->material_id();
         const double       a_d_cell = problem.vessel_map.at(vid).a_d;
         const double       length   = cell->measure();
         if (a_d_cell > 0.0)
-          expected += (eta / a_d_cell) * length;
+          expected_local += (eta / a_d_cell) * length;
       }
   }
+  const double expected =
+    Utilities::MPI::sum(expected_local, problem.mpi_communicator);
 
-  deallog << "J·ones (sum)  = " << sum_Jdw << std::endl;
-  deallog << "expected      = " << expected << "  (= Σ_cells (eta/a_d) · |K|)"
-          << std::endl;
-  deallog << "mu            = " << problem.par["mu"] << std::endl;
-  deallog << "xi            = " << problem.par["xi"] << std::endl;
-  deallog << "rho           = " << problem.par["rho"] << std::endl;
+  // Every quantity above is already a global, rank-identical value, so
+  // print once instead of once per rank.
+  if (Utilities::MPI::this_mpi_process(problem.mpi_communicator) == 0)
+    {
+      deallog << "rest residual=" << std::sqrt(rest_sq)
+              << "  pc=" << std::sqrt(pc_sq) << std::endl;
+      deallog
+        << "||residual with Pc|| = " << residual_l2_norm
+        << "  (should be ~0 at equilibrium when terminal pressure is Pc = P_out )"
+        << std::endl;
+      // Dominated by dP/dA at the boundary trace (wall elasticity), not by
+      // the cell friction term `expected` below accounts for -- with
+      // mu = 0 the friction term vanishes but dP/dA ≈ 5.89e7 here does not,
+      // so this is expected to disagree with `expected` by orders of
+      // magnitude. Diagnostic only.
+      deallog << "J·ones (sum)  = " << sum_Jdw << std::endl;
+      deallog << "expected      = " << expected
+              << "  (= Σ_cells (eta/a_d) · |K|)" << std::endl;
+      deallog << "mu            = " << problem.par["mu"] << std::endl;
+      deallog << "xi            = " << problem.par["xi"] << std::endl;
+      deallog << "rho           = " << problem.par["rho"] << std::endl;
+    }
 }
 
 int
-main()
+main(int argc, char **argv)
 {
+  Utilities::MPI::MPI_InitFinalize mpi(argc, argv, 1);
+  // NOTE: same caveat as the other converted test -- replace this with
+  // whatever your tests.h provides for MPI tests (commonly mpi_initlog() or
+  // MPILogInitAll); plain initlog() is the serial-test convention and
+  // doesn't coordinate output across ranks.
   initlog();
   test();
 }

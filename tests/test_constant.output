@@ -1,3 +1,5 @@
 
-DEAL::n_active_cells = 16
-DEAL::rest residual=1.17830e-14  pc=8.47139e-05
+DEAL::Cell residual  = 7.94411e-15
+DEAL::Trace residual = 3.55271e-15
+DEAL::RCR residual   = 8.47139e-05
+DEAL::Total residual = 8.47139e-05
