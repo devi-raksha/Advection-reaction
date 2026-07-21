@@ -62,6 +62,7 @@ using namespace dealii;
 // ---------------------------------------------------------------------------
 namespace LA
 {
+#define FORCE_USE_OF_TRILINOS
 #if defined(DEAL_II_WITH_PETSC) && !defined(DEAL_II_PETSC_WITH_COMPLEX) && \
   !(defined(DEAL_II_WITH_TRILINOS) && defined(FORCE_USE_OF_TRILINOS))
   using namespace dealii::LinearAlgebraPETSc;

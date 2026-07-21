@@ -1970,8 +1970,8 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_interior_equations(
 
   const FEValuesExtractors::Scalar area_extractor(0);
   const FEValuesExtractors::Scalar velocity_extractor(1);
-  const FEValuesExtractors::Scalar a_hat_extractor(2); // trace area
-  const FEValuesExtractors::Scalar u_hat_extractor(3); // trace velocity
+  // const FEValuesExtractors::Scalar a_hat_extractor(2); // trace area
+  // const FEValuesExtractors::Scalar u_hat_extractor(3); // trace velocity
 
   const QGauss<dim - 1> quad_face(1); // each 1-D face is a single 0-D point
   FEFaceValues<dim, spacedim> fef(*fe,
