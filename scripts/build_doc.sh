@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 set -eu
 
@@ -84,7 +84,7 @@ sed \
   else
     echo "Skipping doxygen generation (set RUN_DOXYGEN=1 to enable)"
   fi
-
+)
 
 sphinx_cmd=(sphinx-build -b html "${DOCS_SOURCE_DIR}" "${SITE_DIR}")
 # If STRICT_DOCS=1 then treat warnings as errors (for CI); otherwise allow warnings.
