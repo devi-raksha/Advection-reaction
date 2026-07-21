@@ -48,3 +48,5 @@ env/
 
 # Generated API docs
 doc/api/
+# pip install logs
+=*
