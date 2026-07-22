@@ -12,9 +12,6 @@ CTestTestfile.cmake
 Makefile
 cmake_install.cmake
 
-# Local build directory
-build/
-
 # Tests build artifacts
 tests/CMakeFiles/
 tests/CTestTestfile.cmake
@@ -37,9 +34,6 @@ source/*.bak
 doc/deal.tag
 doc/html
 
-# Additional build directories
-build-*/
-
 # Testing folder
 Testing/
 
@@ -49,3 +43,10 @@ Testing/
 # LaTeX additional outputs
 latex/*.bbl
 latex/*.blg
+# Virtualenv
+env/
+
+# Generated API docs
+doc/api/
+# pip install logs
+=*
