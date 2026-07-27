@@ -44,6 +44,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -3659,10 +3660,17 @@ BloodFlowSystem<dim, spacedim>::run()
 
         assemble_jacobian(t, y0, ydot0, alpha);
 
+        const double floor_scale =
+          1e-12; // ~ smallest physical DOF magnitude expected;
+                 // adjust if your state has smaller legitimate scales
+
         VectorType v(locally_owned_dofs, mpi_communicator);
         std::srand(this_mpi_process + 1);
         for (const auto i : locally_owned_dofs)
-          v(i) = 2.0 * std::rand() / double(RAND_MAX) - 1.0;
+          {
+            const double scale = std::max(std::abs(y0(i)), floor_scale);
+            v(i) = (2.0 * std::rand() / double(RAND_MAX) - 1.0) * scale;
+          }
         v.compress(VectorOperation::insert);
 
         VectorType yp(y0), ym(y0);
@@ -3685,6 +3693,7 @@ BloodFlowSystem<dim, spacedim>::run()
         d -= fd;
 
         const double abs_err = d.l2_norm();
+
         const double rel_err = abs_err / std::max(1.0, fd.l2_norm());
 
         double                  worst_local = 0.0;
@@ -3751,8 +3760,19 @@ BloodFlowSystem<dim, spacedim>::run()
                             const VectorType &y,
                             const VectorType &ydot,
                             VectorType       &res) -> int {
-        assemble_residual(t, y, ydot, res);
-        return 0;
+        // assemble_residual(t, y, ydot, res);
+        // return 0;
+
+        try
+          {
+            assemble_residual(t, y, ydot, res);
+            return 0;
+          }
+        catch (const std::exception &e)
+          {
+            std::cerr << "EXCEPTION in residual: " << e.what() << std::endl;
+            throw;
+          }
       };
 
       ida.setup_jacobian = [this](const double      t,
@@ -3760,48 +3780,149 @@ BloodFlowSystem<dim, spacedim>::run()
                                   const VectorType &ydot,
                                   const double      alpha) -> int {
         TimerOutput::Scope ts(computing_timer, "setup_jacobian");
-        assemble_jacobian(t, y, ydot, alpha);
-        linear_system_matrix.copy_from(jacobian_matrix);
+        try
+          {
+            assemble_jacobian(t, y, ydot, alpha);
+            linear_system_matrix.copy_from(jacobian_matrix);
 
-        if (use_direct_solver)
-          {
+            if (use_direct_solver)
+              {
 #ifdef USE_PETSC_LA
-            direct_solver = std::make_unique<PETScWrappers::SparseDirectMUMPS>(
-              direct_solver_control);
+                direct_solver =
+                  std::make_unique<PETScWrappers::SparseDirectMUMPS>(
+                    direct_solver_control);
 #else
-            direct_solver = std::make_unique<TrilinosWrappers::SolverDirect>(
-              direct_solver_control);
-            direct_solver->initialize(linear_system_matrix);
+                direct_solver =
+                  std::make_unique<TrilinosWrappers::SolverDirect>(
+                    direct_solver_control);
+                direct_solver->initialize(linear_system_matrix);
 #endif
+              }
+            else
+              {
+                // ilu_preconditioner =
+                // std::make_unique<LA::MPI::PreconditionILU>();
+                // ilu_preconditioner->initialize(linear_system_matrix);
+                const bool need_refactor =
+                  !lu_preconditioner_ready ||
+                  last_gmres_iterations > refactor_iteration_threshold;
+
+                if (need_refactor)
+                  {
+                    lu_preconditioner =
+                      std::make_unique<PETScWrappers::PreconditionLU>();
+                    lu_preconditioner->initialize(linear_system_matrix);
+                    lu_preconditioner_ready = true;
+
+                    if (verbosity > 0)
+                      pcout
+                        << "  [refactorizing MUMPS preconditioner, last GMRES iters="
+                        << last_gmres_iterations << "]" << std::endl;
+                  }
+              }
+            return 0;
           }
-        else
+        catch (const std::exception &e)
           {
-            ilu_preconditioner = std::make_unique<LA::MPI::PreconditionILU>();
-            ilu_preconditioner->initialize(linear_system_matrix);
+            std::cerr << "EXCEPTION in setup_jacobian: " << e.what()
+                      << std::endl;
+            throw;
           }
-        return 0;
       };
 
-      ida.solve_with_jacobian = [this](const VectorType &r,
-                                       VectorType       &z,
-                                       const double /*tol*/) -> int {
-        TimerOutput::Scope ts(computing_timer, "solve_with_jacobian");
+      //       ida.solve_with_jacobian = [this](const VectorType &r,
+      //                                        VectorType       &z,
+      //                                        const double tol) -> int {
+      //         TimerOutput::Scope ts(computing_timer, "solve_with_jacobian");
+      // try{
+      //         if (use_direct_solver)
+      //           {
+      // #ifdef USE_PETSC_LA
+      //             direct_solver->solve(linear_system_matrix, z, r);
+      // #else
+      //             direct_solver->solve(z, r);
+      // #endif
+      //           }
+      //         else
+      //           {
+      //             SolverControl   solver_control(1000, tol);
+      //             LA::SolverGMRES solver(solver_control);
+      //             // solver.solve(linear_system_matrix, z, r,
+      //             *ilu_preconditioner); solver.solve(linear_system_matrix, z,
+      //             r, *lu_preconditioner); std::cerr << "GMRES iterations: "
+      //             << solver_control.last_step()
+      //                       << " final residual: " <<
+      //                       solver_control.last_value()
+      //                       << std::endl;
+      //             last_gmres_iterations = solver_control.last_step();
+      //           }
+      //         return 0;
+      // }
+      //         catch (const std::exception &e)
+      //           {
+      //             std::cerr << "EXCEPTION in solve_with_jacobian: " <<
+      //             e.what()
+      //                       << std::endl;
+      //             throw;
+      //           }
+      //       };
 
-        if (use_direct_solver)
+      ida.solve_with_jacobian =
+        [this](const VectorType &r, VectorType &z, const double tol) -> int {
+        TimerOutput::Scope ts(computing_timer, "solve_with_jacobian");
+        try
           {
+            if (use_direct_solver)
+              {
 #ifdef USE_PETSC_LA
-            direct_solver->solve(linear_system_matrix, z, r);
+                direct_solver->solve(linear_system_matrix, z, r);
 #else
-            direct_solver->solve(z, r);
+                direct_solver->solve(z, r);
 #endif
+              }
+            else
+              {
+                auto try_solve = [&]() {
+                  SolverControl   solver_control(1000, tol);
+                  LA::SolverGMRES solver(solver_control);
+                  solver.solve(linear_system_matrix, z, r, *lu_preconditioner);
+                  last_gmres_iterations = solver_control.last_step();
+                  // std::cerr
+                  //   << "GMRES iterations: " << solver_control.last_step()
+                  //   << " final residual: " << solver_control.last_value()
+                  //   << std::endl;
+                };
+
+                try
+                  {
+                    try_solve();
+                  }
+                catch (const SolverControl::NoConvergence &)
+                  {
+                    // Stale preconditioner: force a fresh factorization and
+                    // retry once.
+                    if (verbosity > 0)
+                      pcout << "  [GMRES failed with stale preconditioner, "
+                               "refactorizing and retrying]"
+                            << std::endl;
+
+                    lu_preconditioner =
+                      std::make_unique<PETScWrappers::PreconditionLU>();
+                    lu_preconditioner->initialize(linear_system_matrix);
+                    lu_preconditioner_ready = true;
+
+                    try_solve(); // if this also throws, it propagates up
+                                 // normally
+                  }
+              }
+            return 0;
           }
-        else
+        catch (const std::exception &e)
           {
-            SolverControl   solver_control(1000, 1e-10 * r.l2_norm());
-            LA::SolverGMRES solver(solver_control);
-            solver.solve(linear_system_matrix, z, r, *ilu_preconditioner);
+            std::cerr << "EXCEPTION in solve_with_jacobian: " << e.what()
+                      << std::endl;
+            throw;
           }
-        return 0;
       };
 
       ida.output_step = [this](const double      t,
@@ -3823,6 +3944,41 @@ BloodFlowSystem<dim, spacedim>::run()
       compute_pressure(solution, pressure);
       compute_errors(cycle);
     }
+
+  // ==========================================================================
+  // Scaling study: dump accumulated wall-clock time per section, tagged with
+  // the process count for this run.  Run the executable several times with
+  // mpirun -np 1, -np 4, -np 8, -np 12, ... (or whatever 2^k ladder you like);
+  // each invocation appends one row per section to the same CSV.  Only rank 0
+  // writes, since TimerOutput's summary is already reduced across ranks.
+  // ==========================================================================
+  {
+    const auto summary = computing_timer.get_summary_data(
+      TimerOutput::OutputData::total_wall_time);
+
+    if (this_mpi_process == 0)
+      {
+        // Fall back to the current directory if none was set in the .prm.
+        const std::string dir =
+          output_directory.empty() ? "." : output_directory;
+
+        // Create it if it doesn't exist yet (no-op if it already does).
+        std::filesystem::create_directories(dir);
+
+        const std::string filename    = dir + "/scaling_timings.csv";
+        const bool        file_exists = std::ifstream(filename).good();
+
+        std::ofstream csv(filename, std::ios::app);
+        AssertThrow(csv, ExcMessage("Cannot open " + filename));
+
+        if (!file_exists)
+          csv << "n_mpi_processes,section,wall_time\n";
+
+        for (const auto &entry : summary)
+          csv << n_mpi_processes << "," << entry.first << "," << entry.second
+              << "\n";
+      }
+  }
 }
 
 // Explicit instantiation

@@ -544,8 +544,14 @@ private:
   // Preconditioner for the iterative path.  Note that PETSc's PCILU is a
   // single-rank preconditioner: with more than one process, initialize() it
   // through a block-Jacobi outer level or fall back to PreconditionAMG.
-  std::unique_ptr<LA::MPI::PreconditionILU> ilu_preconditioner;
 
+  // std::unique_ptr<LA::MPI::PreconditionILU> ilu_preconditioner;
+  // std::unique_ptr<PETScWrappers::PreconditionBoomerAMG> ilu_preconditioner;
+  // std::unique_ptr<PETScWrappers::PreconditionBlockJacobi> ilu_preconditioner;
+  std::unique_ptr<PETScWrappers::PreconditionLU> lu_preconditioner;
+  bool                          lu_preconditioner_ready      = false;
+  unsigned int                  last_gmres_iterations        = 0;
+  static constexpr unsigned int refactor_iteration_threshold = 30;
   // Per-cell mass matrices, indexed by cell->active_cell_index(): deal.II
   // numbers the locally stored active cells contiguously, so no CellId lookup
   // is needed in the residual inner loop.  Only locally owned entries are
