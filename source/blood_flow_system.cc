@@ -3520,6 +3520,107 @@ BloodFlowSystem<dim, spacedim>::output_results(const VectorType  &y,
     }
 }
 
+template <int dim, int spacedim>
+void
+BloodFlowSystem<dim, spacedim>::check_mass_conservation(const VectorType &y,
+                                                        const double t) const
+{
+  TimerOutput::Scope timer(computing_timer, "check_mass_conservation");
+
+  // Force y_fe_relevant to reflect *this* y, not whatever trial iterate IDA
+  // last evaluated a residual/Jacobian at. Without this, the volume integral
+  // below can silently read a stale snapshot, producing exact-zero dV/dt on
+  // some steps and an overshooting "catch-up" jump on the next.
+  update_ghosted_vectors(y);
+
+  const FEValuesExtractors::Scalar area_extractor(0);
+  QGauss<dim>                      quad(fe_degree + 2);
+  FEValues<dim, spacedim> fev(*fe, quad, update_values | update_JxW_values);
+
+  double local_volume = 0.0;
+  for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+      if (!cell->is_locally_owned())
+        continue;
+      fev.reinit(cell);
+      std::vector<double> A_q(quad.size());
+      fev[area_extractor].get_function_values(y_fe_relevant, A_q);
+      for (unsigned int q = 0; q < quad.size(); ++q)
+        local_volume += A_q[q] * fev.JxW(q);
+    }
+  const double total_volume =
+    Utilities::MPI::sum(local_volume, mpi_communicator);
+
+  double local_net_flux = 0.0;
+  for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+      if (!cell->is_locally_owned())
+        continue;
+      for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+        {
+          if (!cell->face(f)->at_boundary())
+            continue;
+          if (is_junction_face(cell->id(), f))
+            continue;
+
+          double A_hat = 0.0, U_hat = 0.0;
+          get_face_trace(y, cell, f, A_hat, U_hat);
+          const double Q   = A_hat * U_hat;
+          const auto   bid = cell->face(f)->boundary_id();
+          local_net_flux += (bid == 0) ? Q : -Q;
+        }
+    }
+  const double net_flux = Utilities::MPI::sum(local_net_flux, mpi_communicator);
+
+  static double prev_volume = total_volume;
+  static double prev_t      = t;
+  const double  dt          = t - prev_t;
+  const double  dVdt = (dt > 0.0) ? (total_volume - prev_volume) / dt : 0.0;
+  const double  imbalance = dVdt - net_flux;
+
+  // Normalize against a slowly-varying flow scale (running peak |net_flux|),
+  // not the instantaneous value -- net_flux legitimately crosses zero every
+  // cardiac cycle (flow reversal), and dividing by it there would blow the
+  // ratio up to hundreds of percent for a perfectly healthy, tiny imbalance.
+  static double flow_scale = 0.0;
+  flow_scale               = std::max(flow_scale, std::abs(net_flux));
+  const double rel_imbalance =
+    std::abs(imbalance) / std::max(1e-12, flow_scale);
+
+  if (this_mpi_process == 0)
+    {
+      static std::ofstream mass_log((output_directory.empty() ?
+                                       "." :
+                                       output_directory) +
+                                      "/mass_conservation.csv",
+                                    std::ios::app);
+      static bool          header_written = false;
+      if (!header_written)
+        {
+          mass_log << "t,total_volume,dVdt,net_flux,imbalance,rel_imbalance\n";
+          header_written = true;
+        }
+      mass_log << std::scientific << std::setprecision(8) << t << ","
+               << total_volume << "," << dVdt << "," << net_flux << ","
+               << imbalance << "," << rel_imbalance << "\n";
+      mass_log.flush();
+    }
+
+  // Two independent gates: relative-to-peak-flow AND an absolute floor.
+  // The absolute floor alone is what actually separates the real bugs you
+  // saw earlier (~1e-4) from ordinary truncation noise (~1e-7-1e-6) --
+  // keep both so a genuine problem can't hide behind either one.
+  constexpr double rel_imbalance_warn_tol = 0.20;
+  constexpr double abs_imbalance_warn_tol = 1e-5;
+  if (this_mpi_process == 0 && rel_imbalance > rel_imbalance_warn_tol &&
+      std::abs(imbalance) > abs_imbalance_warn_tol)
+    pcout << "  [mass check WARNING] t=" << t << " dV/dt=" << dVdt
+          << " net_flux=" << net_flux << " imbalance=" << imbalance << " ("
+          << rel_imbalance * 100.0 << "% of peak flow)" << std::endl;
+
+  prev_volume = total_volume;
+  prev_t      = t;
+}
 // ============================================================================
 // compute_errors
 //
@@ -3933,6 +4034,10 @@ BloodFlowSystem<dim, spacedim>::run()
         compute_pressure(sol, pressure);
         output_results(sol, pressure, step_number);
         write_csv_row(t, sol);
+        if (verbosity > 0)
+          {
+            check_mass_conservation(sol, t);
+          }
       };
 
       // ---- solve -----------------------------------------------------------

@@ -265,6 +265,8 @@ public:
   compute_errors(const unsigned int k);
 
   void
+  check_mass_conservation(const VectorType &y, const double t) const;
+  void
   run();
 
   enum class NumericalFluxType

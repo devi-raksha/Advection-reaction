@@ -17,6 +17,8 @@
 #include <deal.II/base/mpi.h>
 #include <deal.II/base/parameter_handler.h>
 
+#include <deal.II/lac/petsc_solver.h> // deal.II already handles PETSc header ordering internally
+
 #include <iostream>
 #include <stdexcept> // for std::invalid_argument
 
@@ -32,6 +34,11 @@ main(int argc, char **argv)
       Utilities::MPI::MPI_InitFinalize mpi_initialization(argc, argv, 1);
       /* --------------------------- 1. Locate parameter file -----------------
        */
+      // Tell PETSc to use MUMPS whenever an LU factorization is requested
+      // (used by PreconditionLU for the lagged GMRES preconditioner).
+#ifdef USE_PETSC_LA
+      PetscOptionsSetValue(nullptr, "-pc_factor_mat_solver_type", "mumps");
+#endif
       std::string par_name;
       if (argc > 1)
         par_name = argv[1]; // first CLI argument
