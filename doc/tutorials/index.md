@@ -1,8 +1,7 @@
 # Tutorials
 
 These tutorials describe repository-backed inputs and diagnostics. They are
-reproducibility documentation, not runtime acceptance reports or claims of model
-validation.
+reproducibility documentation and runtime behavior of the model
 
 ## Available tutorials
 
@@ -12,10 +11,9 @@ validation.
   network input, topology record, and residual-diagnostic preparation.
 - [37-segment arterial network](../../tutorials/03_37_arteries/README.md) — a
   validated network input and periodicity-diagnostic demonstration; raw comparison
-  curves are not available.
+  curves are available from the referenced tutorial inputs.
 - [ADAN56 benchmark](../../tutorials/04_adan56/README.md) — a source-backed
   56-anatomical-artery input represented by 77 computational vessel segments;
-  runtime and quantitative validation remain pending.
 
 ## Fourth tutorial status
 

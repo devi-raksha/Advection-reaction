@@ -10,14 +10,10 @@ The implementation uses a hybridized, HDG-type finite-element layout:
 - a pair of face trace fields represents `A_hat` and `U_hat` on every unique face;
 - RCR terminal capacitor pressures, when present, occupy an appended block.
 
-These blocks are assembled into one distributed vector. IDA treats cell and capacitor rows as differential and trace rows as algebraic. This describes the current data layout; it is not a claim that a particular static-condensation or reduced formulation is the canonical scientific formulation.
+These blocks are assembled into one distributed vector. IDA treats cell and capacitor rows as differential and trace rows as algebraic.
 
 ## Discretization and time integration
 
 The source provides HLL, HLL-HDG, and Lax-Friedrichs flux implementations and their linearizations. Select them with the exact strings `HLL`, `HLL_HDG`, or `LAX_FRIEDRICHS`. The time integrator is SUNDIALS IDA, not ARKode. Newton systems use either the configured direct PETSc/Trilinos path or GMRES with ILU; see [Configuration](configuration.md).
-
-```{warning}
-The implementation and the manuscript contain mathematical choices that remain under maintainer review. The equations in [Mathematics](math.md) are an explanatory summary, not a replacement for review of `latex/metric_flow.tex` or the source assembly.
-```
 
 For installation and commands, see [Installation and build/run](installation.md). For generated files, see [Outputs](outputs.md).

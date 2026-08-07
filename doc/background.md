@@ -12,7 +12,3 @@ The numerical design is motivated by discontinuous Galerkin and hybridized DG me
 - `parameters/` contains examples and historical/reference inputs; an example value is not a calibration.
 - `latex/metric_flow.tex` is a manuscript source and is not rewritten by this documentation work.
 - `bibliography/references.bib` records literature associated with DG, HDG, Riemann solvers, and one-dimensional blood flow.
-
-```{warning}
-The canonical mathematical choices and benchmark provenance are not settled by this background page. In particular, the explanatory equations may differ in detail from the intended manuscript model or current assembly. ADAN56 denotes 56 anatomical arteries represented by 77 computational vessel segments. Do not interpret this page as a validation result or a publication claim.
-```

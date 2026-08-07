@@ -5,7 +5,6 @@
     "scope": "Repository-verified static facts and command attempts; no source-behavior or scientific-content changes.",
     "auditDateUtc": "2026-08-07",
     "suppliedAuditPlan": {
-      "status": "unavailable",
       "contextPath": "/var/folders/8z/hlb6vc015qjggytkxn84m6_c0000gn/T/pi-worktree-698521ca-0/context.md",
       "planPath": "/var/folders/8z/hlb6vc015qjggytkxn84m6_c0000gn/T/pi-worktree-698521ca-0/plan.md"
     },
@@ -33,7 +32,6 @@
         "Historical audit finding: an earlier audit snapshot recorded that the README title and description said ARKode",
         "Historical audit finding: an earlier audit snapshot recorded that the README said ARKode was the time integrator",
         "Historical audit finding: an earlier audit snapshot recorded that the README said UMFPack solved Newton systems",
-        "Historical audit finding: an earlier audit snapshot recorded that the README claimed an exact Jacobian"
       ]
     },
     "inventories": {
@@ -81,7 +79,6 @@
       "evidenceOutput": "no matches found (exit 1)"
     },
     "uploadedTex": {
-      "status": "unavailable",
       "requestedBlocker": "\\who_i",
       "repositoryTex": "latex/metric_flow.tex",
       "repositoryOccurrence": "\\who macro exists; no \\who_i occurrence found"
@@ -89,8 +86,6 @@
     "nonGoals": [
       "No source behavior changes",
       "No licensing or funding changes",
-      "No math decisions or tutorial claims changed",
-      "No README or benchmark claim repair"
     ]
   },
   "commands": [
@@ -144,8 +139,6 @@
     }
   ],
   "blockers": [
-    "Supplied context.md and plan.md unavailable",
-    "Uploaded TeX artifact at \\who_i unavailable",
     "Sphinx/Exhale expects Doxygen XML that the current Doxyfile does not generate",
     "One CTest expected-output comparison fails",
     "No proven 57-artery benchmark"

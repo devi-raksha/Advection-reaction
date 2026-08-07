@@ -22,7 +22,6 @@ Serve an existing site with:
 ./scripts/serve_doc.sh [PORT]
 ```
 
-The server script expects `build/docs/site` to exist. It activates `env/` when present and uses a compatible `uv` invocation when available; otherwise it reports that `uv` is unavailable. A Python HTTP-server fallback is used for incompatible `uv` command forms.
 
 ## Configuration
 
@@ -33,6 +32,4 @@ The server script expects `build/docs/site` to exist. It activates `env/` when p
 
 The generated `doc/api/` RST tree is a build artifact consumed by Sphinx. It is not hand-authored API documentation.
 
-```{warning}
 A full documentation build requires local Doxygen and Python dependencies. Those tools are not assumed to be installed merely because the C++ project configures successfully. The build status should be reported from the command actually run.
-```

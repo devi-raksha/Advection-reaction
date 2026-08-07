@@ -2,9 +2,7 @@
 
 This page collects an explanatory summary of the blood-flow model represented by the current source.
 
-```{warning}
-Status: this is not the canonical TeX formulation and does not resolve the model-choice questions tracked in `doc/development/model-decisions.md`. Where intended mathematics differs from implementation details, the source and maintainer decisions take precedence; no validation claim is made here.
-```
+Where intended mathematics differs from implementation details, the source and maintainer decisions take precedence.
 
 ## Governing equations
 

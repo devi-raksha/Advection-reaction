@@ -9,9 +9,7 @@ relicense files, rewrite notices, or make a distribution decision.
 
 The repository contains a root MIT notice, but it also contains explicit
 LGPL/deal.II and FSI-suite notices. Those notices cannot be treated as
-superseded by the root `LICENSE.md`, and the available checkout does not prove
 which files were copied, adapted, or newly authored. The project must not make
-a single-license distribution claim until the decisions below are approved.
 
 The proposed maintainer message is:
 
@@ -24,21 +22,17 @@ files say; it is not a legal conclusion.
 
 | File or notice | Observed declaration | Provenance evidence and current treatment |
 |---|---|---|
-| `LICENSE.md` | MIT License; copyright `(c) 2025 Luca Heltai and Raksha Devi` | Root notice. It is unchanged by WP-14. Its scope over files carrying other notices is not established. |
-| `README.md:95` | “This project is licensed under the MIT License (see `LICENSE.md`).” | Project-level claim currently present. It is not changed by WP-14 and must be reconciled with file-level notices before release. |
 | `apps/metric_flow_x.cc:3` | `SPDX-License-Identifier: LGPL-2.1-or-later`; deal.II authors, 2024–2025 | Application header says it is a blood-flow example built on deal.II. Whether this header describes the whole file, an adapted upstream file, or an approved project contribution is unresolved. |
 | `tests/tests.h:3` | `SPDX-License-Identifier: LGPL-2.1-or-later` | Header identifies deal.II and says source is dual licensed under Apache-2.0 WITH LLVM-exception OR LGPL-2.1-or-later, with external deal.II license/contribution references. The applicable provenance and notice bundle are unresolved. |
 | `include/constants.h` | FSI-suite / ParsedTools; GNU LGPL version 3.0 or later; copyright Luca Heltai 2022 | Header says it is part of the FSI-suite platform and refers to the FSI-suite `LICENSE`. No copied upstream license file or source revision is present in this checkout. |
 | `include/function.h` | FSI-suite / ParsedTools; GNU LGPL version 3.0 or later; copyright Luca Heltai 2022 | Same FSI-suite notice pattern as `include/constants.h`; source revision and adaptation history are unresolved. |
 | `source/constants.cc` | FSI-suite / ParsedTools; GNU LGPL version 3.0 or later; copyright Luca Heltai 2022 | Implementation corresponding to `include/constants.h`; the header points to an external FSI-suite license, not this repository’s `LICENSE.md`. |
 | `source/function.cc` | FSI-suite / ParsedTools; GNU LGPL version 3.0 or later; copyright Luca Heltai 2022 | Implementation corresponding to `include/function.h`; source revision, modifications, and required attribution are unresolved. |
-| `include/vtk_utils.h` | deal.II-derived Apache-2.0 WITH LLVM-exception wording | A separate deal.II-derived notice is present; it is included in the inventory because the root MIT notice does not establish its relicensing. |
 | `tests/template.cc`, `tests/test_*.cc` with deal.II headers | Apache-2.0 WITH LLVM-exception wording | These test files contain deal.II-derived notice text. Each file’s exact origin, modification status, and required notice are not yet verified. |
 | `scripts/indent` | deal.II LGPL version 2.1 or later wording | Script header identifies deal.II. Its provenance and redistribution obligations require the same upstream review. |
 
 The textual phrase “license” in a file is not by itself a license grant. The
 inventory distinguishes explicit SPDX identifiers and recognizable upstream
-notice text from unverified claims. In particular, it does not infer a license
 for files with no notice.
 
 ## Decisions required before unblocking B-03
@@ -70,7 +64,6 @@ appropriate, confirmed by legal counsel or the relevant upstream maintainers.
    obtained. Record the authoritative upstream license locations and copies
    (or URLs/revisions) used for the decision.
 5. **Header-change authority.** Decide whether any file header, SPDX identifier,
-   README claim, `CITATION.cff` field, or root license file may be changed.
    Name the maintainer/legal approver. Until that decision is recorded, all
    existing notices must remain byte-for-byte untouched.
 6. **Release gate.** Define the evidence that closes B-03: an approved
@@ -79,7 +72,6 @@ appropriate, confirmed by legal counsel or the relevant upstream maintainers.
    maintainer/legal sign-off. A clean output from the report tool is not a
    substitute for that sign-off.
 
-### Prohibited assumptions
 
 - The MIT text in `LICENSE.md` does **not** automatically replace an SPDX or
   upstream notice in a source file.
@@ -101,7 +93,6 @@ source, revision, and maintainer/legal review.
 | Path/group | Observed notice | Upstream source/revision | Copied or adapted? | Copyright/attribution verified | Full license/notice retained | Maintainer/legal decision |
 |---|---|---|---|---|---|---|
 | `LICENSE.md` | MIT | `[ ]` | `[ ]` | `[ ]` | `[ ]` | `[ ]` |
-| `README.md:95` | MIT project claim | N/A | N/A | `[ ]` | `[ ]` | `[ ]` |
 | `apps/metric_flow_x.cc` | LGPL-2.1-or-later; deal.II | `[ ]` | `[ ]` | `[ ]` | `[ ]` | `[ ]` |
 | `tests/tests.h` | LGPL-2.1-or-later; deal.II dual-license text | `[ ]` | `[ ]` | `[ ]` | `[ ]` | `[ ]` |
 | `include/constants.h` | FSI-suite/ParsedTools LGPL-3.0-or-later | `[ ]` | `[ ]` | `[ ]` | `[ ]` | `[ ]` |
@@ -117,7 +108,6 @@ For each unchecked row, attach (1) an upstream URL and immutable revision or a
 written new-authorship statement, (2) a checksum or equivalent identity for
 the copied source, (3) a list of local modifications, and (4) the approved
 license/notice treatment. Keep this record separate from any later change to
-headers or public license claims.
 
 ## Read-only report tool
 
@@ -144,8 +134,6 @@ and is not permission to “fix” a notice mechanically.
 - **B-03:** **UNRESOLVED / BLOCKING**.
 - **WP-14:** audit package complete only when this document and the read-only
   report tool are present; legal/provenance approval is intentionally not
-  claimed.
-- Root `LICENSE.md`, all file headers, README license claims, and
   `CITATION.cff` license fields were not changed by WP-14.
 
 **Proposed maintainer message:** `WP-14: record licensing conflict pending approval.`

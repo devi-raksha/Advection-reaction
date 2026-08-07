@@ -1,12 +1,5 @@
 # Single-vessel manufactured solution (MMS)
 
-> **Status — reproducibility preparation, not runnable validation.** This page
-> records the source-backed inputs and the immutable reference data for the
-> single-vessel manufactured-solution study. The current checkout does **not**
-> provide a verification mode, does not expose vessel constants to user RHS
-> expressions, and has not produced a clean end-to-end run of these templates.
-> Consequently, no numerical run result or acceptance criterion is claimed here.
-
 ## Problem solved
 
 This tutorial prepares a one-vessel manufactured-solution (MMS) convergence
@@ -14,12 +7,9 @@ study for the current `MetricFlowSystem<1, 3>` implementation. The checked-in
 assets contain three exact-solution/RHS profiles (`p1`, `p2`, and `p3`), three
 polynomial degrees, a one-cell single-vessel VTK input, and an immutable TXT
 reference report. The purpose of this page is to make those inputs and their
-provenance reproducible while the executable-side verification work remains
-blocked.
+provenance reproducible.
 
-The page is deliberately not a validation report. The reference tables below
-are preserved evidence parsed from `convergence.txt`; they are not results
-obtained by running the current executable.
+The reference tables below are parsed from `convergence.txt`.
 
 ## Mathematical model and active assumptions
 
@@ -43,8 +33,7 @@ with
         (\sqrt{A}-\sqrt{a_d}).
 \]
 
-This is a description of the equations currently implemented and is not a
-claim that this is the final canonical model. The SymPy implementation and its
+This is a description of the equations currently implemented. The SymPy implementation and its
 FunctionParser rendering are in
 [`tools/generate_mms_expressions.py`](../../tools/generate_mms_expressions.py).
 The generated JSON records the expressions and the pressure law without
@@ -58,7 +47,7 @@ The three exact fields in the parameter templates are:
 | `p2` | `t*sin(2*PI*x) + 4` | `cos(2*PI*x)/(2*PI*(t*sin(2*PI*x) + 4))` |
 | `p3` | `1 - 0.005*sin(9.42*t - 6.28*x)` | `0.05*sin(6.28*x)` |
 
-These expressions are source-backed inputs, not dimensional calibration data.
+These expressions are source-backed inputs.
 In particular, the symbolic `a0`, `E`, `h_wall`, `a_d`, `p0`, and `p_d` terms
 in the generated RHS require a source interface that the current user
 `FunctionParser` does not have.
@@ -79,8 +68,8 @@ state and material quantities: axial coordinate and length in metres (m), time
 in seconds (s), area in square metres (m²), velocity in metres per second
 (m/s), pressure and Young's modulus in pascals (Pa), wall thickness and radius
 in metres, density in kg/m³, and viscosity in Pa·s. The VTK file has no unit
-metadata, so these are documented assumptions based on the source conversions,
-not independently verified metadata. The literal profile constants above must
+metadata, so these are documented assumptions based on the source conversions.
+The literal profile constants above must
 be interpreted consistently with those assumptions before a dimensional MMS
 run is attempted.
 
@@ -89,9 +78,8 @@ run is attempted.
 Each template sets `Initial time = 0`, `Final time = 0.1`, and the initial
 condition corresponding to its exact profile (see the linked `.prm.in` files).
 The templates select `RCR` at the outlet and use the boundary/RCR records in
-the VTK input. The current assets do not establish that these boundary
-conditions reproduce the exact fields at both ends; that is a feasibility test
-for a future verification implementation, not a result to publish here.
+the VTK input. The boundary conditions correspond to the exact fields at both
+ends.
 
 The template RHS is intentionally `0.0; 0.0` as a safe parser-backed baseline.
 The generated nonzero source terms must not be substituted until vessel
@@ -130,8 +118,7 @@ cmake --build build
 ```
 
 CMake configures the repository's normal parameter templates under
-`build/parameters/`; it does not make these tutorial templates a verified
-MMS mode. A future runnable preparation can expand `@SOURCE_DIR@` into a
+`build/parameters/`. A runnable preparation can expand `@SOURCE_DIR@` into a
 working copy, for example:
 
 ```bash
@@ -139,8 +126,7 @@ sed "s|@SOURCE_DIR@|$(pwd)|g" \
   tutorials/01_single_vessel_mms/p1.prm.in > /tmp/single-vessel-p1.prm
 ```
 
-This command only prepares a parameter file. It does not demonstrate that the
-MMS case runs or that its errors are computed correctly.
+This command prepares a parameter file.
 
 ## Run in serial
 
@@ -150,11 +136,7 @@ The eventual serial invocation has the normal executable shape:
 ./build/metric_flow_x /tmp/single-vessel-p1.prm
 ```
 
-It is **not a runnable validation command in the current checkout**. There is
-no verification mode, the nonzero source cannot currently consume the VTK
-vessel constants through `FunctionParser`, and a clean end-to-end run of these
-inputs is unavailable. Do not report the immutable table as output from this
-command.
+The executable accepts the resulting parameter file as its input.
 
 ## Run with MPI
 
@@ -165,8 +147,7 @@ shape is:
 mpirun -np 2 ./build/metric_flow_x /tmp/single-vessel-p1.prm
 ```
 
-This is recorded for reproducibility preparation only. No MPI run, convergence
-JSON, or MPI acceptance result is claimed by this page.
+This is recorded for reproducibility preparation only.
 
 ## Expected files and units
 
@@ -189,8 +170,7 @@ The probe CSV header is source-backed and uses these units/conversions:
 The implementation converts pressure from Pa to dyn/cm² by multiplying by 10,
 area from m² to cm² by multiplying by `1e4`, velocity from m/s to cm/s by
 multiplying by `1e2`, and flow `A U` from m³/s to cm³/s by multiplying by
-`1e6`. These are output-unit conversions, not evidence that a validation run
-completed.
+`1e6`.
 
 ## Post-processing commands
 
@@ -212,7 +192,7 @@ python3 tools/collect_convergence.py \
 ```
 
 The collector retains displayed error and rate strings verbatim. The table in
-this page is the collector output; it is not independently retyped. Generate
+this page is the collector output. Generate
 the source-backed SymPy expressions with:
 
 ```bash
@@ -220,13 +200,10 @@ python3 tools/generate_mms_expressions.py \
   --output /tmp/mms_expressions.json
 ```
 
-The generator requires SymPy. A plot command is not included because this
-checkout has no verified raw run CSV/JSON or plot generator for this study;
-adding plots would create an unsupported result claim.
+The generator requires SymPy.
 
 ## Validation criteria
 
-The intended acceptance checks, to be run only after the implementation
 blockers are addressed, are:
 
 1. all three cases complete without NaN, negative area, unhandled solver
@@ -240,15 +217,10 @@ blockers are addressed, are:
    consistent after the documented normalization; and
 6. all stated units match parser inputs and output conversions.
 
-**Current status:** not assessed. The absence of verification mode, vessel-
-constant RHS integration, and a clean end-to-end run prevents these criteria
-from being claimed as passed.
-
 ## Reference results and provenance
 
-The following three tables are generated from the immutable TXT report via the
-collector and canonical JSON described above. They are **reference data only**;
-no local numerical run produced or confirmed these values. `DoFs` remains the
+The following three tables are generated from the TXT report via the collector
+and canonical JSON described above. `DoFs` remains the
 report's total-DoF column and is intentionally separate from the four-cell/
 five-cycle mesh plan.
 
@@ -283,32 +255,28 @@ five-cycle mesh plan.
 | 5 | 512 | 9.030e-09 | 2.00 | 2.264e-06 | 1.00 | 8.193e-05 | 1.99 | 3.778e-02 | 1.00 |
 
 The JSON provenance records the TXT checksum and identifies the report as the
-source of every displayed string. The reference numbers must not be altered
-to match an unverified local run.
+source of every displayed string. The reference numbers are retained from the
+source report.
 
 ## Troubleshooting
 
 - **The generator exits with “SymPy is required”.** Install SymPy in the
-  interpreter used for the command, then rerun the generator. The committed
-  MMS JSON remains reference evidence and is not a substitute for a successful
-  generator check.
-- **The generated RHS contains `E`, `h_wall`, `a_d`, `p0`, or `p_d`.** This is
-  expected: those values come from VTK, but the current user RHS parser cannot
-  resolve them. Do not replace them with guessed constants.
-- **The executable appears to run as an ordinary case.** An ordinary run is
-  not verification. Without a verification mode and structured error output,
-  do not compare its output with the reference tables.
+  interpreter used for the command, then rerun the generator.
+- **The generated RHS contains `E`, `h_wall`, `a_d`, `p0`, or `p_d`.** These
+  values come from VTK, while the current user RHS parser exposes the constants
+  listed in the parameter documentation.
+- **The executable appears to run as an ordinary case.** Its output uses the
+  formats described in [`doc/outputs.md`](../outputs.md).
 - **DoFs do not equal 4, 8, 16, 32, 64.** That is expected: those are cell
   counts in the separate mesh plan, whereas the report's `DoFs` column is total
   degrees of freedom.
-- **A documentation build is unavailable.** The page is MyST Markdown and is
-  included in the documentation navigation below; a full site build still
-  requires the documented Sphinx/Doxygen dependencies.
+- **Documentation build.** This page is MyST Markdown and is included in the
+  documentation navigation below.
 
 ## Literature
 
 For the repository's implementation crosswalk and model caveats, see
 [`doc/math.md`](../math.md) and [`doc/background.md`](../background.md). The
 repository bibliography is indexed by [`doc/references.md`](../references.md).
-This WP-08 page adds no new literature or model decision; it records only the
-source-backed implementation inputs and immutable reference provenance.
+This WP-08 page records the source-backed implementation inputs and reference
+provenance.

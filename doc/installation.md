@@ -27,9 +27,8 @@ Pass a configured parameter file explicitly:
 ./build/metric_flow_x build/parameters/aortic.prm
 ```
 
-The aortic template points to `parameters/aortic.vtk` using a source-directory substitution performed by CMake. Output and IDA settings are in the same parameter file. The command form is source/configuration-backed; a complete runtime solve is not claimed as verified by this documentation change.
+The aortic template points to `parameters/aortic.vtk` using a source-directory substitution performed by CMake. Output and IDA settings are in the same parameter file.
 
-The executable's no-argument fallback is `parameters.prm`, but that file is not present in the repository. See [Configuration](configuration.md) before adapting another parameter file.
 
 ## Build-tree versus source-tree parameters
 

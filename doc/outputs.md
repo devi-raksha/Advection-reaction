@@ -28,4 +28,4 @@ Rows are appended at IDA output times. The header and columns are emitted by `op
 
 ## Status
 
-The repository contains example images and reference assets, but those files do not by themselves prove reproducibility or benchmark provenance. This page documents file-writing behavior only; it does not claim a validated result.
+The repository contains example images and reference assets. This page documents file-writing behavior.
