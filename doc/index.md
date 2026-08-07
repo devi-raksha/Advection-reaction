@@ -13,6 +13,7 @@ testing
 documentation
 repository-layout
 getting-started
+tutorials/single-vessel-mms
 background
 math
 references
