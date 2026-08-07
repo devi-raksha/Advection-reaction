@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Blood-flow solver"
+abstract: >-
+  This repository contains a C++/deal.II implementation of a one-dimensional
+  blood-flow model on vessel networks embedded in three-dimensional space. The
+  application currently assembles an HDG-type (hybridized) monolithic system:
+  cell area/velocity unknowns, face trace unknowns, and (for RCR terminals)
+  capacitor-pressure unknowns are held in one distributed vector. SUNDIALS IDA
+  advances the resulting differential-algebraic system.
+repository-code: "https://github.com/devi-raksha/blood-flow"
+
+# TODO: add maintainer names after repository metadata identifies them
+# unambiguously. No author names are asserted here.
