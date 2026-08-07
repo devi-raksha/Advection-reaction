@@ -18,10 +18,17 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "html"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "html", "_static/**"]
 
 # Suppress specific warnings that are benign for this repository build.
-suppress_warnings = ['doxygenfunction']
+suppress_warnings = [
+        'doxygenfunction',
+        # README is included at the documentation root but retains repository
+        # relative links such as doc/configuration.md for GitHub readers.
+        'myst.xref_missing',
+        # Internal audit notes are intentionally not part of the public site.
+        'toc.not_included',
+    ]
 
 html_theme = "furo"
 html_title = project
@@ -37,8 +44,8 @@ breathe_projects = {
     project: os.path.abspath("../build/docs/doxygen/xml"),
 }
 breathe_default_project = project
-bibtex_bibfiles = ["references.bib"]
-bibtex_reference_style = "author_year"
+bibtex_bibfiles = ["../bibliography/references.bib"]
+bibtex_reference_style = "label"
 
 exhale_args = {
     "containmentFolder": "./api",
