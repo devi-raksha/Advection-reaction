@@ -84,7 +84,7 @@ The repository contains example inputs and reference assets for several network 
 ## Citing
 
 If you use this software, please cite it as **Blood-flow solver**. The
-canonical bibliography is [`bibliography/references.bib`](bibliography/references.bib),
+canonical bibliography is `bibliography/references.bib`,
 and its metadata policy and unresolved-key list are documented in
 [`bibliography/README.md`](bibliography/README.md). The documentation reference
 page is [References](doc/references.md). This repository does not claim that

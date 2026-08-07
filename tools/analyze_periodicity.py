@@ -37,7 +37,7 @@ def _read_csv(path: str | Path) -> tuple[list[float], dict[str, list[float]]]:
             traces = [field for field in fields if field.startswith("trace_")]
             if not traces:
                 raise PeriodicityError(
-                    f"{path}: no trace columns found; name each value column 'trace_<name>'"
+                    f"{path}: no trace_* columns found; name each value column 'trace_<name>'"
                 )
             unexpected = [field for field in fields if field != "time" and field not in traces]
             if unexpected:

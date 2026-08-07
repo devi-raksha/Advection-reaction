@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from pathlib import Path
 import sys
 
@@ -38,7 +39,7 @@ def test_multiple_traces_report_deterministic_difference(tmp_path: Path) -> None
         writer.writerow(["time", "trace_a", "trace_b"])
         writer.writerows([[0, 0, 0], [0.5, 0, 0], [1, 1, 2], [1.5, 1, 2], [2, 2, 4], [2.5, 2, 4], [3, 3, 6]])
     result = analyze(path, period=1.0)
-    expected = (2.0 / 5.0) ** 0.5
+    expected = math.sqrt(1.0 / 2.0)
     assert result["traces"]["trace_a"] == pytest.approx(expected)
     assert result["traces"]["trace_b"] == pytest.approx(expected)
 

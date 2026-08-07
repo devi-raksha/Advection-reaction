@@ -13,6 +13,8 @@ testing
 documentation
 repository-layout
 getting-started
+build-and-run
+funding
 tutorials/index
 tutorials/single-vessel-mms
 background

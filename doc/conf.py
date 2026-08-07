@@ -18,7 +18,15 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "html", "_static/**"]
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+    "html",
+    "_static/**",
+    # Development audits are internal records, not public documentation.
+    "development/**",
+]
 
 # Suppress specific warnings that are benign for this repository build.
 suppress_warnings = [
@@ -26,8 +34,6 @@ suppress_warnings = [
         # README is included at the documentation root but retains repository
         # relative links such as doc/configuration.md for GitHub readers.
         'myst.xref_missing',
-        # Internal audit notes are intentionally not part of the public site.
-        'toc.not_included',
     ]
 
 html_theme = "furo"

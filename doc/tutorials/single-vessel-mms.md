@@ -252,7 +252,7 @@ no local numerical run produced or confirmed these values. `DoFs` remains the
 report's total-DoF column and is intentionally separate from the four-cell/
 five-cycle mesh plan.
 
-#### Polynomial degree 3
+### Polynomial degree 3
 
 | Cycle | DoFs | A L2 | A L2 rate | A H1 | A H1 rate | U L2 | U L2 rate | U H1 | U H1 rate |
 |---|---|---|---|---|---|---|---|---|---|
@@ -262,7 +262,7 @@ five-cycle mesh plan.
 | 4 | 384 | 6.598e-12 | 4.00 | 2.855e-09 | 2.99 | 6.602e-08 | 3.99 | 3.855e-05 | 3.00 |
 | 5 | 768 | 4.299e-13 | 3.94 | 3.574e-10 | 3.00 | 4.267e-09 | 3.95 | 4.825e-06 | 3.00 |
 
-#### Polynomial degree 2
+### Polynomial degree 2
 
 | Cycle | DoFs | A L2 | A L2 rate | A H1 | A H1 rate | U L2 | U L2 rate | U H1 | U H1 rate |
 |---|---|---|---|---|---|---|---|---|---|
@@ -272,7 +272,7 @@ five-cycle mesh plan.
 | 4 | 320 | 5.523e-10 | 3.00 | 1.463e-07 | 1.99 | 5.343e-06 | 2.99 | 2.116e-03 | 2.00 |
 | 5 | 640 | 6.908e-11 | 3.00 | 3.668e-08 | 2.00 | 6.707e-07 | 2.99 | 5.297e-04 | 2.00 |
 
-#### Polynomial degree 1
+### Polynomial degree 1
 
 | Cycle | DoFs | A L2 | A L2 rate | A H1 | A H1 rate | U L2 | U L2 rate | U H1 | U H1 rate |
 |---|---|---|---|---|---|---|---|---|---|
