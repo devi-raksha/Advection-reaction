@@ -138,6 +138,13 @@ BloodFlowSystem<dim, spacedim>::initialize_params(const std::string &filename)
   rhs_function.update_constants(par);
   inflow_function.update_constants(par);
 
+  AssertThrow(outlet_type == "RCR" || outlet_type == "Reflection" ||
+                outlet_type == "Single Resistance",
+              ExcMessage("Unknown outlet boundary condition type: " +
+                         outlet_type +
+                         ". Supported values are RCR, Reflection, and "
+                         "Single Resistance."));
+
   if (numerical_flux_type_str == "HLL")
     numerical_flux_type = NumericalFluxType::HLL;
   else if (numerical_flux_type_str == "HLL_HDG")
@@ -2136,7 +2143,9 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_boundary_equations(
               res_A = A_hat_cur * U_hat_cur - Q_in;
               res_U = (U_hat_cur - 4.0 * (c_hat - c0)) - W2_int;
             }
-          else if (outlet_type == "RCR" && rcr_map.count(bid) &&
+          else if ((outlet_type == "RCR" ||
+                    outlet_type == "Single Resistance") &&
+                   rcr_map.count(bid) &&
                    (rcr_map.at(bid).R1 > 0.0 || rcr_map.at(bid).R2 > 0.0))
 
             {
@@ -3115,7 +3124,9 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
                                       -(phi_U - 4.0 * dc_int * phi_A));
                 }
             }
-          else if (outlet_type == "RCR" && rcr_map.count(bid) &&
+          else if ((outlet_type == "RCR" ||
+                    outlet_type == "Single Resistance") &&
+                   rcr_map.count(bid) &&
                    (rcr_map.at(bid).R1 > 0.0 || rcr_map.at(bid).R2 > 0.0))
 
             {
