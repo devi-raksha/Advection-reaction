@@ -26,7 +26,7 @@ files say; it is not a legal conclusion.
 |---|---|---|
 | `LICENSE.md` | MIT License; copyright `(c) 2025 Luca Heltai and Raksha Devi` | Root notice. It is unchanged by WP-14. Its scope over files carrying other notices is not established. |
 | `README.md:95` | “This project is licensed under the MIT License (see `LICENSE.md`).” | Project-level claim currently present. It is not changed by WP-14 and must be reconciled with file-level notices before release. |
-| `apps/blood_flow.cc:3` | `SPDX-License-Identifier: LGPL-2.1-or-later`; deal.II authors, 2024–2025 | Application header says it is a blood-flow example built on deal.II. Whether this header describes the whole file, an adapted upstream file, or an approved project contribution is unresolved. |
+| `apps/metric_flow_x.cc:3` | `SPDX-License-Identifier: LGPL-2.1-or-later`; deal.II authors, 2024–2025 | Application header says it is a blood-flow example built on deal.II. Whether this header describes the whole file, an adapted upstream file, or an approved project contribution is unresolved. |
 | `tests/tests.h:3` | `SPDX-License-Identifier: LGPL-2.1-or-later` | Header identifies deal.II and says source is dual licensed under Apache-2.0 WITH LLVM-exception OR LGPL-2.1-or-later, with external deal.II license/contribution references. The applicable provenance and notice bundle are unresolved. |
 | `include/constants.h` | FSI-suite / ParsedTools; GNU LGPL version 3.0 or later; copyright Luca Heltai 2022 | Header says it is part of the FSI-suite platform and refers to the FSI-suite `LICENSE`. No copied upstream license file or source revision is present in this checkout. |
 | `include/function.h` | FSI-suite / ParsedTools; GNU LGPL version 3.0 or later; copyright Luca Heltai 2022 | Same FSI-suite notice pattern as `include/constants.h`; source revision and adaptation history are unresolved. |
@@ -102,7 +102,7 @@ source, revision, and maintainer/legal review.
 |---|---|---|---|---|---|---|
 | `LICENSE.md` | MIT | `[ ]` | `[ ]` | `[ ]` | `[ ]` | `[ ]` |
 | `README.md:95` | MIT project claim | N/A | N/A | `[ ]` | `[ ]` | `[ ]` |
-| `apps/blood_flow.cc` | LGPL-2.1-or-later; deal.II | `[ ]` | `[ ]` | `[ ]` | `[ ]` | `[ ]` |
+| `apps/metric_flow_x.cc` | LGPL-2.1-or-later; deal.II | `[ ]` | `[ ]` | `[ ]` | `[ ]` | `[ ]` |
 | `tests/tests.h` | LGPL-2.1-or-later; deal.II dual-license text | `[ ]` | `[ ]` | `[ ]` | `[ ]` | `[ ]` |
 | `include/constants.h` | FSI-suite/ParsedTools LGPL-3.0-or-later | `[ ]` | `[ ]` | `[ ]` | `[ ]` | `[ ]` |
 | `include/function.h` | FSI-suite/ParsedTools LGPL-3.0-or-later | `[ ]` | `[ ]` | `[ ]` | `[ ]` | `[ ]` |

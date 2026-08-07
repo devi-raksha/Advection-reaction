@@ -3,9 +3,9 @@ import sys
 import io
 import glob
 
-project = "blood-flow"
-author = "contributors"
-html_baseurl = ""
+project = "MetricFlow-X"
+author = "Raksha Devi and Luca Heltai"
+html_baseurl = "https://luca-heltai.github.io/metric-flow-x/"
 default_role = "any"
 
 extensions = [
@@ -30,11 +30,11 @@ exclude_patterns = [
 
 # Suppress specific warnings that are benign for this repository build.
 suppress_warnings = [
-        'doxygenfunction',
-        # README is included at the documentation root but retains repository
-        # relative links such as doc/configuration.md for GitHub readers.
-        'myst.xref_missing',
-    ]
+    'doxygenfunction',
+    # README is included at the documentation root but retains repository
+    # relative links such as doc/configuration.md for GitHub readers.
+    'myst.xref_missing',
+]
 
 html_theme = "furo"
 html_title = project
@@ -73,7 +73,8 @@ myst_enable_extensions = [
 mathjax_path = (
     "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
 )
- 
+
+
 def _strip_operator_doxygenfunctions(api_dir):
     """Remove doxygenfunction directives that reference operator overloads.
 
@@ -120,5 +121,6 @@ def remove_operator_doxygenfunctions(app, env, docnames):
 
 def setup(app):
     app.connect("env-before-read-docs", remove_operator_doxygenfunctions)
+
 
 mermaid_version = "11.4.1"

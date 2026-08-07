@@ -49,7 +49,7 @@
       },
       "parameterFilesWithPrmSuffix": 26,
       "uniqueParameterSetKeys": 51,
-      "applications": ["apps/blood_flow.cc"],
+      "applications": ["apps/metric_flow_x.cc"],
       "vtk": [
         {
           "path": "parameters/single_vessel.vtk",
@@ -83,7 +83,7 @@
     "uploadedTex": {
       "status": "unavailable",
       "requestedBlocker": "\\who_i",
-      "repositoryTex": "latex/blood_flow.tex",
+      "repositoryTex": "latex/metric_flow.tex",
       "repositoryOccurrence": "\\who macro exists; no \\who_i occurrence found"
     },
     "nonGoals": [
@@ -110,7 +110,7 @@
       "command": "cmake --build build",
       "result": "passed",
       "exitCode": 0,
-      "output": "Built test_library and blood_flow; 10 unused-variable warnings for trace extractors."
+      "output": "Built test_library and metric_flow_x; 10 unused-variable warnings for trace extractors."
     },
     {
       "command": "ctest --test-dir build --output-on-failure",
@@ -131,10 +131,10 @@
       "output": "Configuration error: Exhale specified folder .../build/docs/doxygen/xml does not exist. Has Doxygen been run?"
     },
     {
-      "command": "(cd latex && latexmk -pdf -interaction=nonstopmode -outdir=/tmp/metric-flow-x-latex-audit2 blood_flow.tex)",
+      "command": "(cd latex && latexmk -pdf -interaction=nonstopmode -outdir=/tmp/metric-flow-x-latex-audit2 metric_flow.tex)",
       "result": "passed",
       "exitCode": 0,
-      "output": "pdfTeX/BibTeX completed; Output written .../blood_flow.pdf (14 pages); warnings include overfull hbox and hyperref PDF-string warnings."
+      "output": "pdfTeX/BibTeX completed; Output written .../metric_flow.pdf (14 pages); warnings include overfull hbox and hyperref PDF-string warnings."
     },
     {
       "command": "git grep -n -i -E '57[ -]?arter|57 arteries|57-arter' HEAD -- ':(exclude)*.png'",

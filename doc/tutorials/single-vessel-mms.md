@@ -10,7 +10,7 @@
 ## Problem solved
 
 This tutorial prepares a one-vessel manufactured-solution (MMS) convergence
-study for the current `BloodFlowSystem<1, 3>` implementation. The checked-in
+study for the current `MetricFlowSystem<1, 3>` implementation. The checked-in
 assets contain three exact-solution/RHS profiles (`p1`, `p2`, and `p3`), three
 polynomial degrees, a one-cell single-vessel VTK input, and an immutable TXT
 reference report. The purpose of this page is to make those inputs and their
@@ -24,7 +24,7 @@ obtained by running the current executable.
 ## Mathematical model and active assumptions
 
 The source-backed generator derives sources from the volume equations assembled
-in [`source/blood_flow_system.cc`](../../source/blood_flow_system.cc):
+in [`source/metric_flow_system.cc`](../../source/metric_flow_system.cc):
 
 \[
   A_t + (A U)_x = f_A,
@@ -147,7 +147,7 @@ MMS case runs or that its errors are computed correctly.
 The eventual serial invocation has the normal executable shape:
 
 ```bash
-./build/blood_flow /tmp/single-vessel-p1.prm
+./build/metric_flow_x /tmp/single-vessel-p1.prm
 ```
 
 It is **not a runnable validation command in the current checkout**. There is
@@ -162,7 +162,7 @@ After the same implementation blockers are resolved, the corresponding MPI
 shape is:
 
 ```bash
-mpirun -np 2 ./build/blood_flow /tmp/single-vessel-p1.prm
+mpirun -np 2 ./build/metric_flow_x /tmp/single-vessel-p1.prm
 ```
 
 This is recorded for reproducibility preparation only. No MPI run, convergence

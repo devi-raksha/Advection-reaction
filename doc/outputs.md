@@ -1,6 +1,6 @@
 # Outputs
 
-Output is controlled by `Output filename` and `Output directory` in the `BloodFlowSystem<1, 3>` section. An empty output directory writes into the process working directory; otherwise the implementation prefixes generated names with that directory.
+Output is controlled by `Output filename` and `Output directory` in the `MetricFlowSystem<1, 3>` section. An empty output directory writes into the process working directory; otherwise the implementation prefixes generated names with that directory.
 
 ## Visualization files
 
@@ -20,7 +20,7 @@ At setup, the implementation opens one CSV file per vessel at its arc-length mid
 HDG_IDA_Vessel_<vessel-id>.csv
 ```
 
-Rows are appended at IDA output times. The header and columns are emitted by `open_csv_files()`/`write_csv_row()` in `source/blood_flow_system.cc`; consumers should treat them as implementation output rather than a stable file-format contract.
+Rows are appended at IDA output times. The header and columns are emitted by `open_csv_files()`/`write_csv_row()` in `source/metric_flow_system.cc`; consumers should treat them as implementation output rather than a stable file-format contract.
 
 ## Logs and parameter receipt
 

@@ -2,7 +2,7 @@
 
 `references.bib` is the canonical bibliography for this repository. It was
 consolidated from the tracked `doc/references.bib` and
-`latex/blood_flow.bib` files. Entries are included only when their metadata is
+`latex/metric_flow.bib` files. Entries are included only when their metadata is
 already present in one of those source files.
 
 ## Metadata policy
@@ -49,6 +49,6 @@ otherwise unavailable TeX material may refer to them.
 ## Use
 
 Use `bibliography/references.bib` for new documentation or manuscript tooling.
-The tracked manuscript still has its historical `latex/blood_flow.bib` input;
+The tracked manuscript still has its historical `latex/metric_flow.bib` input;
 this canonical file does not silently rewrite that manuscript input. Run
 `python3 tools/check_bibliography.py` before adding or changing citation keys.

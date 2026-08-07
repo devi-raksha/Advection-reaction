@@ -24,7 +24,7 @@ network topology; this tutorial does not claim tapering.
 ## 4. Prerequisites
 
 A POSIX shell and Python 3 are required for input validation and diagnostics. A
-configured and built `blood_flow` executable with deal.II, SUNDIALS/IDA, and its
+configured and built `metric_flow_x` executable with deal.II, SUNDIALS/IDA, and its
 selected linear-algebra backend is additionally required for a solver run. The local
 environment may not provide that executable. The periodicity tool uses only the
 Python standard library.
@@ -53,7 +53,7 @@ junction with K incident vessels, the implementation assembles exactly `2K` rows
 one conservation row, `K-1` total-head rows, and K compatibility rows. Here K is
 computed from the active graph (37 vessel segments overall); the equation and
 orientation details remain those implemented by
-`assemble_trace_junction_equations` in `source/blood_flow_system.cc`. This section
+`assemble_trace_junction_equations` in `source/metric_flow_system.cc`. This section
 records the source contract and does not introduce an alternate equation set.
 
 ## 8. Parameter configuration
@@ -71,7 +71,7 @@ Validate and attempt the tutorial from the repository root or this directory:
 ```bash
 ./tutorials/03_37_arteries/run.sh
 # or select an executable explicitly:
-BLOOD_FLOW_EXECUTABLE=/path/to/blood_flow ./tutorials/03_37_arteries/run.sh
+METRIC_FLOW_X_EXECUTABLE=/path/to/metric_flow_x ./tutorials/03_37_arteries/run.sh
 ```
 
 The script validates the copied VTK and parameter path before invoking the solver.

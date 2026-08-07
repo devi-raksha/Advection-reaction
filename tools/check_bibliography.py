@@ -27,7 +27,7 @@ DOI_RE = re.compile(r"\bdoi\s*=\s*[\{\"]\s*([^\}\"\s,]+)", re.IGNORECASE)
 # This value is copied verbatim from the MR3345205 entry in both tracked
 # source bibliographies. Do not add DOI values without source-backed metadata.
 CORE_DOI_ALLOWLIST = {"MR3345205": "10.1016/j.jcp.2015.04.009"}
-SOURCE_BIBS = ("doc/references.bib", "latex/blood_flow.bib")
+SOURCE_BIBS = ("doc/references.bib", "latex/metric_flow.bib")
 
 
 @dataclass

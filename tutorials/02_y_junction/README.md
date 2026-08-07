@@ -21,7 +21,7 @@ parameter files.
 ## 4. Prerequisites
 
 A POSIX shell, Python 3, and this checkout are required for input validation and
-the diagram tools. A configured and built `blood_flow` executable with deal.II,
+the diagram tools. A configured and built `metric_flow_x` executable with deal.II,
 SUNDIALS/IDA, and its selected linear-algebra backend is additionally required
 for a solver run. The local environment may not provide that executable.
 
@@ -56,7 +56,7 @@ Let vessel 0 be the first half-face and vessels 1 and 2 the other half-faces;
 Here the implementation defines `H_i = (gamma/2) Uhat_i^2 + p(Ahat_i)/rho`,
 `W_i = U_i + s_i 4(c_i - c0_i)`, and evaluates `c` with the source tube
 law. This is a transcription of `assemble_trace_junction_equations` in
-`source/blood_flow_system.cc`; it is not a replacement equation set.
+`source/metric_flow_system.cc`; it is not a replacement equation set.
 
 ## 8. Parameter configuration
 
@@ -72,7 +72,7 @@ Validate and run from the repository root or this directory:
 ```bash
 ./tutorials/02_y_junction/run.sh
 # or select an executable explicitly:
-BLOOD_FLOW_EXECUTABLE=/path/to/blood_flow ./tutorials/02_y_junction/run.sh
+METRIC_FLOW_X_EXECUTABLE=/path/to/metric_flow_x ./tutorials/02_y_junction/run.sh
 ```
 
 The script validates the copied network and parameter path first. If no

@@ -10,7 +10,7 @@ The numerical design is motivated by discontinuous Galerkin and hybridized DG me
 
 - `source/` and `include/` describe current executable behavior.
 - `parameters/` contains examples and historical/reference inputs; an example value is not a calibration.
-- `latex/blood_flow.tex` is a manuscript source and is not rewritten by this documentation work.
+- `latex/metric_flow.tex` is a manuscript source and is not rewritten by this documentation work.
 - `bibliography/references.bib` records literature associated with DG, HDG, Riemann solvers, and one-dimensional blood flow.
 
 ```{warning}

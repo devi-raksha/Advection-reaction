@@ -1,7 +1,7 @@
 # Documentation audit baseline (WP-00)
 
-**Project:** metric-flow-x (repository name: blood-flow)  
-**Audit date (UTC):** 2026-08-07  
+**Project:** metric-flow-x (repository name: blood-flow)
+**Audit date (UTC):** 2026-08-07
 **Scope:** repository-verified static facts and command attempts only. This document is a baseline, not a proposal to change implementation or scientific claims.
 
 ## Inputs and limitations
@@ -11,7 +11,7 @@ The supplied audit context and plan were not present at the requested paths:
 - `/var/folders/8z/hlb6vc015qjggytkxn84m6_c0000gn/T/pi-worktree-698521ca-0/context.md` — unavailable.
 - `/var/folders/8z/hlb6vc015qjggytkxn84m6_c0000gn/T/pi-worktree-698521ca-0/plan.md` — unavailable.
 
-(The worktree uses the equivalent `/private/var/...` prefix; neither file was found.) No supplied audit plan was therefore available. Findings below are limited to files in this checkout and the commands recorded here. The uploaded TeX material containing the requested `\who_i` blocker is also unavailable; the repository contains `latex/blood_flow.tex` and defines `\who`, but no `\who_i` occurrence was found.
+(The worktree uses the equivalent `/private/var/...` prefix; neither file was found.) No supplied audit plan was therefore available. Findings below are limited to files in this checkout and the commands recorded here. The uploaded TeX material containing the requested `\who_i` blocker is also unavailable; the repository contains `latex/metric_flow.tex` and defines `\who`, but no `\who_i` occurrence was found.
 
 ## Repository snapshot and hash inventory
 
@@ -32,7 +32,7 @@ The audit files are the only intended repository changes. Generated `build/` and
 
 ## Static implementation facts
 
-- `source/blood_flow_system.cc` and `include/blood_flow_system.h` instantiate **SUNDIALS IDA**, not ARKode (`SUNDIALS::IDA<VectorType>` and `solve_dae`).
+- `source/metric_flow_system.cc` and `include/metric_flow_system.h` instantiate **SUNDIALS IDA**, not ARKode (`SUNDIALS::IDA<VectorType>` and `solve_dae`).
 - The unknown layout is documented in source comments and code as `FESystem(FE_DGQ(fe_degree), 2)` for cell area/velocity, `FE_DGQ(1), 2` for trace area/velocity, followed by terminal-capacitor pressures. This is an HDG-type monolithic vector with cell, trace, and capacitor blocks; trace rows are algebraic for IDA.
 - The direct path selects PETSc `SparseDirectMUMPS` when PETSc is active, or `TrilinosWrappers::SolverDirect` otherwise. The iterative path uses `LA::SolverGMRES` with `LA::MPI::PreconditionILU`.
 - An earlier audit snapshot recorded stale README claims relative to those facts: it said `Blood Flow DG/ARKode Solver`, named ARKode as the time integrator, named UMFPACK, and claimed an exact Jacobian. These are historical audit findings, not claims made by the current README, and were recorded rather than edited.
@@ -41,7 +41,7 @@ The audit files are the only intended repository changes. Generated `build/` and
 
 ## Parameter inventory
 
-`find parameters -type f` reports 76 files: 26 `*.prm*` files, 2 VTK meshes, 3 notebooks, 1 TXT file, 3 CSV files, and 41 PNG files. There is one application source (`apps/blood_flow.cc`). There are 51 unique `set` keys across `parameters/**/*.prm*`.
+`find parameters -type f` reports 76 files: 26 `*.prm*` files, 2 VTK meshes, 3 notebooks, 1 TXT file, 3 CSV files, and 41 PNG files. There is one application source (`apps/metric_flow_x.cc`). There are 51 unique `set` keys across `parameters/**/*.prm*`.
 
 The parameter inventory includes mesh path, finite-element degree, refinement, flux/stability controls, physical constants (`rho`, `mu`, `E`, `h_wall`, `a0`, `a_d`, `p_d`, `p0`, `r0`, `L`, `m`), boundary/RCR data (`R1`, `R2`, `C`, `P_out`), initial/final time and tolerances, output controls, direct/iterative selection, and solver settings. Existing files include both `ARKOde parameters` and `IDA parameters` subsections; no parameter-file migration was attempted.
 
@@ -62,11 +62,11 @@ Both include `CELL_DATA` vessel/physical arrays and `POINT_DATA` boundary/RCR ar
 
 ### Configure and build
 
-Command: `cmake -S . -B build`  
+Command: `cmake -S . -B build`
 **PASS (exit 0).** deal.II 9.8.0-rc1 was found at `/Applications/deal.II.app/Contents/Resources/Libraries`; CMake configured 12 tests and generated build files.
 
-Command: `cmake --build build`  
-**PASS (exit 0).** `test_library` and `blood_flow` built successfully. The compiler emitted 10 `-Wunused-variable` warnings for `a_hat_extractor` and `u_hat_extractor` in `source/blood_flow_system.cc`.
+Command: `cmake --build build`
+**PASS (exit 0).** `test_library` and `metric_flow_x` built successfully. The compiler emitted 10 `-Wunused-variable` warnings for `a_hat_extractor` and `u_hat_extractor` in `source/metric_flow_system.cc`.
 
 ### CTest inventory
 
@@ -85,7 +85,7 @@ The configured 12 tests are:
 11. `tests/test_trace_residual.debug`
 12. `tests/test_vtk.debug`
 
-Command: `ctest --test-dir build --output-on-failure`  
+Command: `ctest --test-dir build --output-on-failure`
 **FAIL (exit 8):** 11/12 passed; `tests/test_jacobian_cell.debug` failed its expected-output DIFF. Exact reported diagnostic:
 
 ```text
@@ -107,7 +107,7 @@ The test built and ran before the expected-output comparison failed. No test out
 
 `doc/Doxyfile` exists and requests HTML output from `./source`, with `GENERATE_XML = NO`, while `doc/conf.py` configures Breathe/Exhale to consume `build/docs/doxygen/xml`.
 
-Command: `doxygen doc/Doxyfile`  
+Command: `doxygen doc/Doxyfile`
 **PASS (exit 0), with warnings.** Exact relevant warnings:
 
 ```text
@@ -119,7 +119,7 @@ Doxygen version used: 1.17.0
 
 Doxygen generated HTML, but did not generate the XML tree expected by the Sphinx configuration.
 
-Command: `sphinx-build -b html doc doc/_build/html`  
+Command: `sphinx-build -b html doc doc/_build/html`
 **FAIL (exit 2).** Exact blocker:
 
 ```text
@@ -131,9 +131,9 @@ The installed Sphinx executable was Sphinx 7.4.7. `python3 -m sphinx --version` 
 
 ## LaTeX inventory
 
-Tracked source files include `latex/blood_flow.tex` and `latex/blood_flow.bib`. The uploaded TeX artifact requested for the `\who_i` check was not present, so its status is **unavailable**, not passed or failed.
+Tracked source files include `latex/metric_flow.tex` and `latex/metric_flow.bib`. The uploaded TeX artifact requested for the `\who_i` check was not present, so its status is **unavailable**, not passed or failed.
 
-Command (outputs isolated under `/tmp`): `(cd latex && latexmk -pdf -interaction=nonstopmode -outdir=/tmp/metric-flow-x-latex-audit2 blood_flow.tex)`  
+Command (outputs isolated under `/tmp`): `(cd latex && latexmk -pdf -interaction=nonstopmode -outdir=/tmp/metric-flow-x-latex-audit2 metric_flow.tex)`
 **PASS (exit 0).** pdfTeX/BibTeX completed and wrote a 14-page PDF. The run emitted a persistent overfull box warning (`7.71951pt too wide` at line 746) and hyperref warnings about math tokens in PDF strings. The first run also reported undefined references before the BibTeX/rerun cycle; the final output was produced. This is a build result, not a claim that the manuscript is publication-clean.
 
 ## Benchmark and reference-data evidence

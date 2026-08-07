@@ -15,7 +15,7 @@ cmake -S . -B build
 cmake --build build
 ```
 
-CMake builds the `test_library` shared library and an executable for each source file in `apps/`; the current application target is `blood_flow`. It also copies `parameters/` into `build/parameters/`. `.prm.in` files are configured, so `aortic.prm.in` is available as `build/parameters/aortic.prm` after configuration.
+CMake builds the `test_library` shared library and an executable for each source file in `apps/`; the current application target is `metric_flow_x`. It also copies `parameters/` into `build/parameters/`. `.prm.in` files are configured, so `aortic.prm.in` is available as `build/parameters/aortic.prm` after configuration.
 
 The audit recorded successful configure and build commands in a checkout with deal.II 9.8.0-rc1. A different installation may select a different backend or expose different optional features.
 
@@ -24,7 +24,7 @@ The audit recorded successful configure and build commands in a checkout with de
 Pass a configured parameter file explicitly:
 
 ```bash
-./build/blood_flow build/parameters/aortic.prm
+./build/metric_flow_x build/parameters/aortic.prm
 ```
 
 The aortic template points to `parameters/aortic.vtk` using a source-directory substitution performed by CMake. Output and IDA settings are in the same parameter file. The command form is source/configuration-backed; a complete runtime solve is not claimed as verified by this documentation change.

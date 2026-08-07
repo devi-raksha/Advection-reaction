@@ -1,5 +1,5 @@
 # WP-07 evidence template; not a claimed runnable MMS case.
-subsection BloodFlowSystem<1, 3>
+subsection MetricFlowSystem<1, 3>
   set Finite element degree                = 3
   set Number of global refinement          = 2
   set Number of refinement cycles          = 5

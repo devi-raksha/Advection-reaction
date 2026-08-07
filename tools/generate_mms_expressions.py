@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Derive manufactured sources for the implemented 1-D blood-flow equations.
 
-The volume equations assembled by ``BloodFlowSystem`` are
+The volume equations assembled by ``MetricFlowSystem`` are
 
   A_t + (A U)_x = f_A
   U_t + (U^2/2 + p(A)/rho)_x - eta U/A = f_U,
@@ -122,7 +122,7 @@ def main(argv=None) -> int:
         names = PROFILES if args.profile == "all" else [args.profile]
         payload = {
             "schema": "blood-flow-mms-v1",
-            "equations": "implemented volume equations in source/blood_flow_system.cc",
+            "equations": "implemented volume equations in source/metric_flow_system.cc",
             "profiles": derive_all(names),
         }
     except RuntimeError as exc:

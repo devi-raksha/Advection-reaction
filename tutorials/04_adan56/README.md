@@ -26,7 +26,7 @@ establishes more.
 ## 4. Prerequisites
 
 A POSIX shell and Python 3 are required for input validation and diagram
-regeneration. A configured and built `blood_flow` executable with deal.II,
+regeneration. A configured and built `metric_flow_x` executable with deal.II,
 SUNDIALS/IDA, and its selected linear-algebra backend is additionally required
 for a solver run. The local environment may not provide that executable.
 
@@ -60,7 +60,7 @@ The source assembles the network junction equations for each junction from the
 active graph. This tutorial records the source contract for the 77-segment
 network; it does not introduce an alternate equation set or claim mathematical
 verification. Equation and orientation details remain those implemented by
-`assemble_trace_junction_equations` in `source/blood_flow_system.cc`.
+`assemble_trace_junction_equations` in `source/metric_flow_system.cc`.
 
 ## 8. Parameter configuration
 
@@ -78,7 +78,7 @@ Validate and attempt the tutorial from the repository root or this directory:
 ```bash
 ./tutorials/04_adan56/run.sh
 # or select an executable explicitly:
-BLOOD_FLOW_EXECUTABLE=/path/to/blood_flow ./tutorials/04_adan56/run.sh
+METRIC_FLOW_X_EXECUTABLE=/path/to/metric_flow_x ./tutorials/04_adan56/run.sh
 ```
 
 The script validates the copied VTK and parameter path before invoking the

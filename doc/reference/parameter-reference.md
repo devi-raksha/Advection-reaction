@@ -1,8 +1,8 @@
 # Parameter reference
 
-This page is a compact reference for entries registered by the current `BloodFlowSystem<1, 3>` source. It is intentionally not an exhaustive transcription of every historical file under `parameters/`.
+This page is a compact reference for entries registered by the current `MetricFlowSystem<1, 3>` source. It is intentionally not an exhaustive transcription of every historical file under `parameters/`.
 
-## `BloodFlowSystem<1, 3>`
+## `MetricFlowSystem<1, 3>`
 
 | Entry | Registered meaning |
 |---|---|
@@ -19,11 +19,10 @@ This page is a compact reference for entries registered by the current `BloodFlo
 | `Verbosity (console depth)` | deal.II console/file log depth. |
 | `Numerical flux type` | `HLL`, `HLL_HDG`, or `LAX_FRIEDRICHS`. |
 | `Use Riemann Invariants` | Boundary-treatment switch. |
-| `Use junction mesh` | Junction-mesh switch. |
 | `Outlet boundary condition type` | Outlet boundary mode, such as `RCR`. |
 | `Vtk file path for mesh input` | Input legacy VTK network path. |
 
-## `Blood Flow Parameters`
+## `Metric Flow Parameters`
 
 The source registers these named constants:
 

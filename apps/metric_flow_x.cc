@@ -6,7 +6,7 @@
  *
  *  This file is part of the blood-flow example built on the deal.II library.
  *  It provides the top-level executable that steers the templated
- *  BloodFlowSystem<1,3> class.  The structure mirrors main_embedded.cc so that
+ *  MetricFlowSystem<1,3> class.  The structure mirrors main_embedded.cc so that
  *  build rules, CMake targets, and user habits remain consistent across
  *  multiple applications in the same repository.
  *
@@ -22,7 +22,7 @@
 #include <stdexcept> // for std::invalid_argument
 #include <string>
 
-#include "blood_flow_system.h" // header exposing BloodFlowSystem
+#include "metric_flow_system.h" // header exposing MetricFlowSystem
 
 using namespace dealii;
 
@@ -153,7 +153,7 @@ main(int argc, char **argv)
           command_line.mode == CommandLineMode::validate_parameters)
         require_readable_parameter_file(command_line.parameter_file);
 
-      BloodFlowSystem<1, 3> problem; // 1-dim geometry embedded in \mathbb{R}^3
+      MetricFlowSystem<1, 3> problem; // 1-dim geometry embedded in \mathbb{R}^3
 
       if (command_line.mode == CommandLineMode::print_parameters)
         {

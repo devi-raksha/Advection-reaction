@@ -6,7 +6,7 @@ TUTORIAL_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$TUTORIAL_DIR/../.." && pwd)
 NETWORK="$TUTORIAL_DIR/network.vtk"
 PARAMETER_INPUT=${1:-"$TUTORIAL_DIR/parameters.prm.in"}
-EXECUTABLE=${BLOOD_FLOW_EXECUTABLE:-"$ROOT_DIR/build/blood_flow"}
+EXECUTABLE=${METRIC_FLOW_X_EXECUTABLE:-"$ROOT_DIR/build/metric_flow_x"}
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "ERROR: python3 is required to validate network.vtk; no solver run was performed." >&2
@@ -25,8 +25,8 @@ if [[ ! -f "$PARAMETER_INPUT" ]]; then
   exit 2
 fi
 if [[ ! -x "$EXECUTABLE" ]]; then
-  echo "ERROR: configured blood_flow executable not found or not executable: $EXECUTABLE" >&2
-  echo "       Configure and build the project, or set BLOOD_FLOW_EXECUTABLE." >&2
+  echo "ERROR: configured metric_flow_x executable not found or not executable: $EXECUTABLE" >&2
+  echo "       Configure and build the project, or set METRIC_FLOW_X_EXECUTABLE." >&2
   echo "       No solver run was performed; this script does not claim runtime success." >&2
   exit 3
 fi

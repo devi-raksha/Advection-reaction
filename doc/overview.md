@@ -1,6 +1,6 @@
 # Overview
 
-This project solves a one-dimensional blood-flow model on a network of line segments embedded in three-dimensional space. The current application is `apps/blood_flow.cc`, which instantiates `BloodFlowSystem<1, 3>` and reads a deal.II parameter file before constructing the mesh and running IDA.
+This project solves a one-dimensional blood-flow model on a network of line segments embedded in three-dimensional space. The current application is `apps/metric_flow_x.cc`, which instantiates `MetricFlowSystem<1, 3>` and reads a deal.II parameter file before constructing the mesh and running IDA.
 
 ## Unknown layout
 
@@ -17,7 +17,7 @@ These blocks are assembled into one distributed vector. IDA treats cell and capa
 The source provides HLL, HLL-HDG, and Lax-Friedrichs flux implementations and their linearizations. Select them with the exact strings `HLL`, `HLL_HDG`, or `LAX_FRIEDRICHS`. The time integrator is SUNDIALS IDA, not ARKode. Newton systems use either the configured direct PETSc/Trilinos path or GMRES with ILU; see [Configuration](configuration.md).
 
 ```{warning}
-The implementation and the manuscript contain mathematical choices that remain under maintainer review. The equations in [Mathematics](math.md) are an explanatory summary, not a replacement for review of `latex/blood_flow.tex` or the source assembly.
+The implementation and the manuscript contain mathematical choices that remain under maintainer review. The equations in [Mathematics](math.md) are an explanatory summary, not a replacement for review of `latex/metric_flow.tex` or the source assembly.
 ```
 
 For installation and commands, see [Installation and build/run](installation.md). For generated files, see [Outputs](outputs.md).

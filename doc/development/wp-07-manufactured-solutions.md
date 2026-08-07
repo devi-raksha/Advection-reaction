@@ -4,7 +4,7 @@
 
 - `tools/generate_mms_expressions.py` derives exact mass and momentum source
   terms with SymPy from the volume equations assembled in
-  `source/blood_flow_system.cc`.
+  `source/metric_flow_system.cc`.
 - `tools/collect_convergence.py` parses the supplied report once and renders
   Markdown or TeX without retyping values.
 - `tutorials/01_single_vessel_mms/reference/convergence.txt` is a byte-for-byte
@@ -13,7 +13,7 @@
 ## Remaining blocker (source-backed)
 
 The current `FunctionParser` instances are constructed with the constants
-`rho`, `mu`, `xi`, `m`, and `Rt` (see `source/blood_flow_system.cc`). The
+`rho`, `mu`, `xi`, `m`, and `Rt` (see `source/metric_flow_system.cc`). The
 implemented pressure law additionally reads vessel-specific `E`, `h_wall`,
 `a_d`, `p0`, and `p_d` from VTK data. A user `RHS expression` cannot currently
 refer to those vessel values. Therefore the generated expressions preserve

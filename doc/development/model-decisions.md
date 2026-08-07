@@ -38,7 +38,7 @@
 - **Severity:** High (legal provenance and distribution)
 - **Evidence:**
   - Root project license is MIT in `LICENSE.md:1`.
-  - `apps/blood_flow.cc:3` carries `SPDX-License-Identifier: LGPL-2.1-or-later`.
+  - `apps/metric_flow_x.cc:3` carries `SPDX-License-Identifier: LGPL-2.1-or-later`.
   - `tests/tests.h:3` carries `SPDX-License-Identifier: LGPL-2.1-or-later`; `tests/tests.h:8-11` also refers to deal.II dual licensing and its external `LICENSE.md`/`CONTRIBUTING.md`.
   - The copied ParsedTools/FSI files `include/constants.h`, `include/function.h`, `source/constants.cc`, and `source/function.cc` carry FSI-suite / GNU LGPL-3.0-or-later notices in their file headers.
 - **Decision needed:** Establish provenance and license treatment for each copied or adapted file, confirm which notices must remain, determine the project-level license/notice presentation, and obtain any required upstream attribution or permission review.
@@ -49,11 +49,11 @@
 
 - **Severity:** Critical (scientific correctness and claims)
 - **Evidence:**
-  - `latex/blood_flow.tex:70-73` defines density and the viscous-friction coefficient; `source/blood_flow_system.cc:70-74` exposes density, viscosity/profile friction, and tube-law parameters.
-  - `latex/blood_flow.tex:112-121` defines pressure and wave-speed derivatives; `source/blood_flow_system.cc:1595-1601` and `source/blood_flow_system.cc:1696-1698` implement HLL Jacobian/wave-speed derivative paths.
-  - `latex/blood_flow.tex:282-325` documents HLL wave speeds and flux branches; `source/blood_flow_system.cc:1552-1601` implements HLL residual/Jacobian paths.
-  - `latex/blood_flow.tex:908-939` documents consistent initialization and differential rates; `source/blood_flow_system.cc:1166-1245` implements initial-solution/trace initialization.
-  - `source/blood_flow_system.cc:1022-1023` records the global cell/trace layout decision; `latex/blood_flow.tex:768-835` describes the monolithic DAE block structure.
+  - `latex/metric_flow.tex:70-73` defines density and the viscous-friction coefficient; `source/metric_flow_system.cc:70-74` exposes density, viscosity/profile friction, and tube-law parameters.
+  - `latex/metric_flow.tex:112-121` defines pressure and wave-speed derivatives; `source/metric_flow_system.cc:1595-1601` and `source/metric_flow_system.cc:1696-1698` implement HLL Jacobian/wave-speed derivative paths.
+  - `latex/metric_flow.tex:282-325` documents HLL wave speeds and flux branches; `source/metric_flow_system.cc:1552-1601` implements HLL residual/Jacobian paths.
+  - `latex/metric_flow.tex:908-939` documents consistent initialization and differential rates; `source/metric_flow_system.cc:1166-1245` implements initial-solution/trace initialization.
+  - `source/metric_flow_system.cc:1022-1023` records the global cell/trace layout decision; `latex/metric_flow.tex:768-835` describes the monolithic DAE block structure.
 - **Decision needed:** Resolve and record the canonical choices for friction density, the `m`/square-root law, `gamma`, HLL speeds and derivatives, monolithic versus condensation formulation, initial rates, and the proof/verification status of each choice.
 - **Prohibited assumptions:** Do not select a parameterization from a single `.prm` file as the scientific model; do not treat an implementation or manuscript equation as proof of correctness; do not infer HLL derivative validity from compilation; do not call the system monolithic or condensed without maintainer agreement; do not claim validated initial rates.
 - **Status:** **UNRESOLVED / BLOCKING**.
@@ -62,11 +62,11 @@
 
 - **Severity:** High (publication integrity)
 - **Evidence:**
-  - The repository TeX source is `latex/blood_flow.tex`.
+  - The repository TeX source is `latex/metric_flow.tex`.
   - The uploaded TeX material is newer than the repository copy, but has a `\\who_i` compile blocker and unfinished analysis.
   - The repository copy contains the current manuscript material but is not thereby established as the canonical publication source.
 - **Decision needed:** Identify the canonical TeX source, decide whether/how the newer upload is imported, resolve the `\\who_i` compile blocker, and define the acceptance gate for the unfinished analysis before publication claims are made.
-- **Prohibited assumptions:** Do not silently overwrite `latex/blood_flow.tex`; do not treat a non-compiling upload as publication-ready; do not treat the repository copy as canonical solely because it compiles or is tracked; do not report unfinished analysis as completed.
+- **Prohibited assumptions:** Do not silently overwrite `latex/metric_flow.tex`; do not treat a non-compiling upload as publication-ready; do not treat the repository copy as canonical solely because it compiles or is tracked; do not report unfinished analysis as completed.
 - **Status:** **UNRESOLVED / BLOCKING**.
 
 ## B-06 — Provenance for image-only 37/56 results
