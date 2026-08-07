@@ -1,6 +1,6 @@
 # WP-01: Blocking maintainer decisions
 
-**Status:** Unresolved; all blockers below require a maintainer decision before the affected benchmark, model, or publication material is treated as canonical.
+**Overall status:** B-01 identity is resolved, but its source/license/raw-reference provenance remains pending; B-02 through B-06 remain unresolved and require maintainer decisions before the affected benchmark, model, funding, license, or publication material is treated as canonical.
 
 **Scope of this record:** WP-01 records evidence and decisions needed only. It does not change source code, legal or funding text, model claims, benchmark data, or tutorials.
 
@@ -13,11 +13,14 @@
   - `parameters/benchmark-parameters/37arteries_network/37_vessel_network.prm` references `notebooks/37_vessel_network.vtk`.
   - `parameters/benchmark-parameters/56_ADNR/56_adnr.prm` references `notebooks/56_adnr_new.vtk`.
   - The corresponding mesh/data locations are `NumData/37-arteries/` and `NumData/56-arteries/`.
-  - The recorded topology tuples are: bifurcation **4/3/1/3**; 37 network **38/37/15/17**; `56_adnr` **78/77/30/32 with taper**; `56_adnr_new` **78/77/30/32 without taper**.
-  - No proven 57-artery dataset has been identified.
-- **Decision needed:** Confirm the meaning and ordering of each topology tuple, select the canonical 37 and 56 input files, decide whether taper is part of the `56_adnr` benchmark definition, and decide whether a 57-artery result may be named or shown at all.
-- **Prohibited assumptions:** Do not infer tuple component meanings; do not treat similarly named VTK files as equivalent; do not treat a 37- or 56-artery dataset as a 57-artery dataset; do not claim taper/no-taper equivalence.
-- **Status:** **UNRESOLVED / BLOCKING**.
+  - `notebooks/56_adnr_new.vtk` validates as 78 points and 77 `VTK_LINE` cells, with vessel IDs 0 through 76 and terminal boundary IDs 1 through 31.
+  - The selected VTK contains cell arrays `vessel_id`, `a0`, `a_d`, `E`, `h_wall`, `p_d`, `p0`, `L`, and `r_d`, and point arrays `boundary_id`, `R1`, `R2`, `C`, and `P_out`.
+  - `notebooks/56_adnr.vtk` has the same points/connectivity and common arrays but additionally contains `r_in` and `r_out`; the variants are not treated as equivalent.
+  - **Maintainer clarification:** ADAN56 denotes **56 anatomical arteries represented by 77 computational vessel segments**.
+- **Resolved decision (identity):** The ADAN56 identity is resolved for this work unit. `notebooks/56_adnr_new.vtk` is the selected tutorial input because it is the mesh referenced by the existing 56_ADNR parameter source; its exact arrays and connectivity were checked before copying. The tutorial must use the ADAN56 name and must not assert a different anatomical artery count.
+- **Provenance still needed:** Source attribution and license/raw-data provenance for the underlying network remain pending. Raw reference data, literature linkage, complete run provenance, and any quantitative benchmark acceptance evidence also remain pending; image-only results remain demonstration/reference material.
+- **Prohibited assumptions:** Do not infer scientific equivalence between the `56_adnr` and `56_adnr_new` variants; do not infer raw numerical values, literature claims, thresholds, or runtime success from filenames, images, or parameter proximity.
+- **Status:** **IDENTITY RESOLVED; SOURCE/LICENSE/RAW-REFERENCE PROVENANCE PENDING**.
 
 ## B-02 — Grant and funding attribution
 
@@ -81,4 +84,4 @@
 
 ## Proposed maintainer message
 
-> **WP-01: record blocking maintainer decisions.** Please resolve B-01 through B-06 before benchmark, model, funding, license, or publication claims proceed. Confirm dataset topology and canonical inputs (including taper and the absence of a proven 57-artery dataset); provide the exact 101172493 dealii-X Horizon Europe/EuroHPC JU contract wording; approve provenance and notice treatment for MIT/LGPL/deal.II/FSI-suite files; select and verify the model choices and proof status; establish the canonical TeX source and publication gate; and require raw provenance or demonstration labels for image-only 37/56 results. GitHub Issues are disabled, so no issue links were opened.
+> **WP-01: record blocking maintainer decisions.** Please resolve the remaining B-01 provenance items and B-02 through B-06 decisions before benchmark, model, funding, license, or publication claims proceed. Confirm dataset topology and canonical inputs (including taper); provide the exact 101172493 dealii-X Horizon Europe/EuroHPC JU contract wording; approve provenance and notice treatment for MIT/LGPL/deal.II/FSI-suite files; select and verify the model choices and proof status; establish the canonical TeX source and publication gate; and require raw provenance or demonstration labels for image-only 37/56 results. GitHub Issues are disabled, so no issue links were opened.

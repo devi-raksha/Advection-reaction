@@ -79,7 +79,7 @@ The current configured discovery includes `template`, `test_constant`, Jacobian 
 
 ## Scope and status
 
-The repository contains example inputs and reference assets for several network sizes, including 37- and 56-artery material. No source-backed 57-artery benchmark is claimed here, and this work intentionally does not add a 57-artery tutorial. Mathematical choices, benchmark provenance, and canonical publication status remain separate review topics; see `doc/development/documentation-audit.md` and `doc/development/model-decisions.md`.
+The repository contains example inputs and reference assets for several network sizes, including 37-artery material and the ADAN56 benchmark, which represents 56 anatomical arteries with 77 computational vessel segments. Mathematical choices, benchmark provenance, and canonical publication status remain separate review topics; see `doc/development/documentation-audit.md` and `doc/development/model-decisions.md`.
 
 ## Citing
 

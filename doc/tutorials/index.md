@@ -13,14 +13,16 @@ validation.
 - [37-segment arterial network](../../tutorials/03_37_arteries/README.md) — a
   validated network input and periodicity-diagnostic demonstration; raw comparison
   curves are not available.
+- [ADAN56 benchmark](../../tutorials/04_adan56/README.md) — a source-backed
+  56-anatomical-artery input represented by 77 computational vessel segments;
+  runtime and quantitative validation remain pending.
 
-## Requested fourth tutorial
+## Fourth tutorial status
 
-The requested 57-artery tutorial is **blocked by B-01** (dataset identity and
-benchmark provenance). No source-backed 57-artery input, terminal data, inflow,
-validation data, or literature source is available in this checkout. The existing
-56-labeled assets are not silently treated as a 57-artery case. No fourth tutorial
-page or guessed benchmark prose is created until a maintainer resolves B-01.
+The maintainer clarified the ADAN56 identity as 56 anatomical arteries represented
+computationally by 77 vessel segments. The tutorial records that identity and the
+selected `56_adnr_new.vtk` input, while keeping missing source/license details,
+raw reference data, and runtime provenance visibly pending.
 
 See [result provenance](../development/result-provenance.md) for the evidence status
 of these inputs and result artifacts.
