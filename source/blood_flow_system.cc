@@ -58,7 +58,7 @@ BloodFlowSystem<dim, spacedim>::BloodFlowSystem()
                  dealii::FunctionParser<spacedim>::default_variable_names() +
                    ",t")
   , exact_solution("Functions",
-                   "1e-4; 0.0",
+                   "1e-4; 0.0; 1e-4; 0.0",
                    "Exact solution",
                    par,
                    dealii::FunctionParser<spacedim>::default_variable_names() +
@@ -1698,7 +1698,23 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_boundary_equations(
 
           double res_A = 0.0, res_U = 0.0;
 
-          if (bid == 0) // inflow
+          if (outlet_type == "Dirichlet")
+            {
+              // Manufactured-solution boundary condition.  Pin the boundary
+              // trace directly to the exact (A, U).  Because res_A depends
+              // only on A_hat and res_U only on U_hat, the boundary trace is
+              // fully decoupled from the interior: it injects no boundary
+              // error and cannot pollute the interior convergence rate.
+              // Applied at every non-junction boundary face (inlet + outlets),
+              // which is what an MMS study needs.  Uses the same
+              // `exact_solution` FunctionParser already used in
+              // compute_errors(), so the two are guaranteed consistent.
+              exact_solution.set_time(t);
+              const Point<spacedim> xf = cell->face(f)->center();
+              res_A = A_hat_cur - exact_solution.value(xf, 0);
+              res_U = U_hat_cur - exact_solution.value(xf, 1);
+            }
+          else if (bid == 0) // inflow
             {
               inflow_function.set_time(t);
               const double Q_in   = inflow_function.value(Point<1>(0.0));
@@ -1715,11 +1731,11 @@ BloodFlowSystem<dim, spacedim>::assemble_trace_boundary_equations(
               const double Q   = A_hat_cur * U_hat_cur;
               if (rcr.C > 0.0)
                 {
-                  // const double Pc = terminal_Pc_storage.at(bid);
-                  // res_A =
-                  //   compute_pressure_value(A_hat, vid, a_d_local) - (rcr.R1 *
-                  //   Q + Pc);
-                  const double Pc = y[rcr_pc_dof.at(bid)];
+                  // const double Pc =
+                  // terminal_Pc_storage.at(bid); res_A =
+                  //   compute_pressure_value(A_hat, vid,
+                  //   a_d_local) - (rcr.R1 * Q + Pc);
+                  const double Pc = y(rcr_pc_dof.at(bid));
                   res_A = compute_pressure_value(A_hat, vid, a_d_local) -
                           (rcr.R1 * Q + Pc);
                 }
@@ -2536,17 +2552,29 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
           std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
           cell->get_dof_indices(ldofs);
 
-          if (bid == 0) // inflow
+          if (outlet_type == "Dirichlet")
+            {
+              // res_A = A_hat - A_exact(x,t)  ->  d res_A / d A_hat = 1
+              // res_U = U_hat - U_exact(x,t)  ->  d res_U / d U_hat = 1
+              // No dependence on the interior cell state, so the (2,1) block
+              // is empty here -- exactly the decoupling that keeps the
+              // boundary from contaminating the interior error.
+              jacobian_matrix.add(a_row, a_row, 1.0);
+              jacobian_matrix.add(u_row, u_row, 1.0);
+            }
+          else if (bid == 0) // inflow
             {
               // R1 = A_hat * U_hat - Q_in(t)
               // R2 = U_hat - 4(c_hat - c0) - W2_int
               // where W2_int = U_int - 4(c_int - c0)
 
-              // \partialR1/ \partialA_hat, \partialR1/ \partialU_hat
+              // \partialR1/ \partialA_hat, \partialR1/
+              // \partialU_hat
               jacobian_matrix.add(a_row, a_row, U_hat_cur);
               jacobian_matrix.add(a_row, u_row, A_hat);
 
-              // \partialR2/\partialA_hat, \partialR2/\partialU_hat
+              // \partialR2/\partialA_hat,
+              // \partialR2/\partialU_hat
               jacobian_matrix.add(u_row, a_row, -4.0 * dc_hat);
               jacobian_matrix.add(u_row, u_row, 1.0);
 
@@ -2555,7 +2583,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
                 {
                   const double phi_A = fef[area_extractor].value(j, 0);
                   const double phi_U = fef[velocity_extractor].value(j, 0);
-                  // \partialW2_int/\partialw_int = phi_U - 4*dc_int*phi_A
+                  // \partialW2_int/\partialw_int = phi_U -
+                  // 4*dc_int*phi_A
                   jacobian_matrix.add(u_row,
                                       ldofs[j],
                                       -(phi_U - 4.0 * dc_int * phi_A));
@@ -2602,9 +2631,10 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
                   // res_A = P(A_hat) - R2*(A_hat*U_hat) - P_out
                   // res_U = U_hat + 4(c_hat - c0) - W1_int
                   //
-                  // dres_A/dA_hat = dP/dA_hat - R2*U_hat   (same form as RCR
-                  // with R2) dres_A/dU_hat = -R2*A_hat               (R2
-                  // replaces R1) Pc term drops out (no capacitor, no time
+                  // dres_A/dA_hat = dP/dA_hat - R2*U_hat   (same
+                  // form as RCR with R2) dres_A/dU_hat =
+                  // -R2*A_hat               (R2 replaces R1) Pc
+                  // term drops out (no capacitor, no time
                   // derivative)
                   jacobian_matrix.add(a_row,
                                       a_row,
@@ -2613,7 +2643,8 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
 
                   // dres_U/dA_hat = 4*dc_hat
                   // dres_U/dU_hat = 1
-                  // (identical to RCR — res_U has no R dependence)
+                  // (identical to RCR — res_U has no R
+                  // dependence)
                   jacobian_matrix.add(u_row, a_row, 4.0 * dc_hat);
                   jacobian_matrix.add(u_row, u_row, 1.0);
 
@@ -2635,15 +2666,18 @@ BloodFlowSystem<dim, spacedim>::assemble_jacobian_trace_boundary_block(
               // R1 = U_hat + 4(c_hat - c0) - W1_int
               // R2 = U_hat - 4(c_hat - c0) - (-Rt * W1_int)
 
-              // \partialR1/\partialA_hat, \partialR1/\partialU_hat
+              // \partialR1/\partialA_hat,
+              // \partialR1/\partialU_hat
               jacobian_matrix.add(a_row, a_row, 4.0 * dc_hat);
               jacobian_matrix.add(a_row, u_row, 1.0);
 
-              // \partialR2/\partialA_hat, \partialR2/\partialU_hat
+              // \partialR2/\partialA_hat,
+              // \partialR2/\partialU_hat
               jacobian_matrix.add(u_row, a_row, -4.0 * dc_hat);
               jacobian_matrix.add(u_row, u_row, 1.0);
 
-              // \partialR1 and \partialR2 /\partial(A_int,U_int) via W1_int
+              // \partialR1 and \partialR2 /\partial(A_int,U_int)
+              // via W1_int
               for (unsigned int j = 0; j < fe->n_dofs_per_cell(); ++j)
                 {
                   const double phi_A = fef[area_extractor].value(j, 0);
@@ -3027,8 +3061,88 @@ BloodFlowSystem<dim, spacedim>::output_results(
   std::cout << "  Wrote <" << fname << ">" << std::endl;
 }
 
+// //
 // ============================================================================
-// compute_errors
+// // compute_errors
+// //
+// ============================================================================
+// template <int dim, int spacedim>
+// void
+// BloodFlowSystem<dim, spacedim>::compute_errors(const unsigned int k)
+// {
+//   TimerOutput::Scope timer(computing_timer, "compute_errors");
+
+//   // NOTE: the FE now has 4 components (A, U, A_hat, U_hat), so the masks
+//   // select out of 4 and `exact_solution` MUST be a 4-component Function
+//   // (components 2,3 are irrelevant here since they are masked out).  This
+//   // routine is meaningful only for manufactured-solution verification runs.
+//   const ComponentSelectFunction<spacedim> area_mask(0, 1.0, 4);
+//   const ComponentSelectFunction<spacedim> vel_mask(1, 1.0, 4);
+
+//   Vector<float> diff(triangulation.n_active_cells());
+
+//   // integrate_difference indexes via the full FE DOF map.
+//   Vector<double> cell_sol(dof_handler.n_dofs());
+//   for (types::global_dof_index i = 0; i < dof_handler.n_dofs(); ++i)
+//     cell_sol[i] = solution[i];
+
+//   exact_solution.set_time(time);
+
+//   auto l2_error = [&](const ComponentSelectFunction<spacedim> &mask) {
+//     VectorTools::integrate_difference(dof_handler,
+//                                       cell_sol,
+//                                       exact_solution,
+//                                       diff,
+//                                       QGauss<dim>(fe_degree + 3),
+//                                       VectorTools::L2_norm,
+//                                       &mask);
+//     return VectorTools::compute_global_error(triangulation,
+//                                              diff,
+//                                              VectorTools::L2_norm);
+//   };
+//   auto h1_error = [&](const ComponentSelectFunction<spacedim> &mask) {
+//     VectorTools::integrate_difference(dof_handler,
+//                                       cell_sol,
+//                                       exact_solution,
+//                                       diff,
+//                                       QGauss<dim>(fe_degree + 3),
+//                                       VectorTools::H1_seminorm,
+//                                       &mask);
+//     return VectorTools::compute_global_error(triangulation,
+//                                              diff,
+//                                              VectorTools::H1_seminorm);
+//   };
+
+//   const double AL2 = l2_error(area_mask);
+//   const double AH1 = h1_error(area_mask);
+//   const double UL2 = l2_error(vel_mask);
+//   const double UH1 = h1_error(vel_mask);
+
+//   static double prev_AL2 = 0, prev_AH1 = 0, prev_UL2 = 0, prev_UH1 = 0;
+
+//   auto rate = [&](double prev, double cur) -> double {
+//     return (k == 0 || prev == 0.0) ? 0.0 : std::log(prev / cur) /
+//     std::log(2.0);
+//   };
+
+//   std::cout << std::scientific << std::setprecision(3)
+//             << "=== Errors t=" << time << " cycle " << k + 1 << " ===\n"
+//             << " A  L2=" << AL2 << " rate=" << rate(prev_AL2, AL2) << "\n"
+//             << " A  H1=" << AH1 << " rate=" << rate(prev_AH1, AH1) << "\n"
+//             << " U  L2=" << UL2 << " rate=" << rate(prev_UL2, UL2) << "\n"
+//             << " U  H1=" << UH1 << " rate=" << rate(prev_UH1, UH1) << "\n"
+//             << " DoFs cell=" << n_cell_dofs << " trace=" << n_trace_dofs
+//             << " total=" << n_total_dofs << "\n"
+//             << std::string(60, '=') << "\n";
+
+//   prev_AL2 = AL2;
+//   prev_AH1 = AH1;
+//   prev_UL2 = UL2;
+//   prev_UH1 = UH1;
+// }
+
+// ============================================================================
+// compute_errors  (enhanced: accumulates and prints a running summary table)
 // ============================================================================
 template <int dim, int spacedim>
 void
@@ -3036,16 +3150,12 @@ BloodFlowSystem<dim, spacedim>::compute_errors(const unsigned int k)
 {
   TimerOutput::Scope timer(computing_timer, "compute_errors");
 
-  // NOTE: the FE now has 4 components (A, U, A_hat, U_hat), so the masks
-  // select out of 4 and `exact_solution` MUST be a 4-component Function
-  // (components 2,3 are irrelevant here since they are masked out).  This
-  // routine is meaningful only for manufactured-solution verification runs.
+  // NOTE: FE has 4 components (A, U, A_hat, U_hat); exact_solution MUST be
+  // a 4-component Function.  Components 2,3 are masked out.
   const ComponentSelectFunction<spacedim> area_mask(0, 1.0, 4);
   const ComponentSelectFunction<spacedim> vel_mask(1, 1.0, 4);
 
-  Vector<float> diff(triangulation.n_active_cells());
-
-  // integrate_difference indexes via the full FE DOF map.
+  Vector<float>  diff(triangulation.n_active_cells());
   Vector<double> cell_sol(dof_handler.n_dofs());
   for (types::global_dof_index i = 0; i < dof_handler.n_dofs(); ++i)
     cell_sol[i] = solution[i];
@@ -3082,26 +3192,74 @@ BloodFlowSystem<dim, spacedim>::compute_errors(const unsigned int k)
   const double UL2 = l2_error(vel_mask);
   const double UH1 = h1_error(vel_mask);
 
-  static double prev_AL2 = 0, prev_AH1 = 0, prev_UL2 = 0, prev_UH1 = 0;
+  // ---------- history vectors (persist across cycles) ----------
+  static std::vector<double>       hist_AL2, hist_AH1, hist_UL2, hist_UH1;
+  static std::vector<unsigned int> hist_ncell, hist_ntrace, hist_ntot;
 
-  auto rate = [&](double prev, double cur) -> double {
-    return (k == 0 || prev == 0.0) ? 0.0 : std::log(prev / cur) / std::log(2.0);
+  hist_AL2.push_back(AL2);
+  hist_AH1.push_back(AH1);
+  hist_UL2.push_back(UL2);
+  hist_UH1.push_back(UH1);
+  hist_ncell.push_back(n_cell_dofs);
+  hist_ntrace.push_back(n_trace_dofs);
+  hist_ntot.push_back(n_total_dofs);
+
+  auto rate = [](double prev, double cur) -> double {
+    return (prev == 0.0 || cur == 0.0) ? 0.0 :
+                                         std::log(prev / cur) / std::log(2.0);
   };
+
+  // ---------- per-cycle line (kept from your original) ----------
+  const double r_AL2 = (k == 0) ? 0.0 : rate(hist_AL2[k - 1], AL2);
+  const double r_AH1 = (k == 0) ? 0.0 : rate(hist_AH1[k - 1], AH1);
+  const double r_UL2 = (k == 0) ? 0.0 : rate(hist_UL2[k - 1], UL2);
+  const double r_UH1 = (k == 0) ? 0.0 : rate(hist_UH1[k - 1], UH1);
 
   std::cout << std::scientific << std::setprecision(3)
             << "=== Errors t=" << time << " cycle " << k + 1 << " ===\n"
-            << " A  L2=" << AL2 << " rate=" << rate(prev_AL2, AL2) << "\n"
-            << " A  H1=" << AH1 << " rate=" << rate(prev_AH1, AH1) << "\n"
-            << " U  L2=" << UL2 << " rate=" << rate(prev_UL2, UL2) << "\n"
-            << " U  H1=" << UH1 << " rate=" << rate(prev_UH1, UH1) << "\n"
+            << " A  L2=" << AL2 << " rate=" << r_AL2 << "\n"
+            << " A  H1=" << AH1 << " rate=" << r_AH1 << "\n"
+            << " U  L2=" << UL2 << " rate=" << r_UL2 << "\n"
+            << " U  H1=" << UH1 << " rate=" << r_UH1 << "\n"
             << " DoFs cell=" << n_cell_dofs << " trace=" << n_trace_dofs
             << " total=" << n_total_dofs << "\n"
             << std::string(60, '=') << "\n";
 
-  prev_AL2 = AL2;
-  prev_AH1 = AH1;
-  prev_UL2 = UL2;
-  prev_UH1 = UH1;
+  // ---------- ASCII summary table (grows every cycle) ----------
+  const std::string hline(
+    "+-------+---------+-----------+-------+-----------+-------+-----------+-------+-----------+-------+");
+
+  std::cout << "\n"
+            << hline << "\n"
+            << "| Cycle |  DoFs   |    A L2   | rate  |    A H1   | rate  |"
+            << "    U L2   | rate  |    U H1   | rate  |\n"
+            << hline << "\n";
+
+  for (std::size_t i = 0; i < hist_AL2.size(); ++i)
+    {
+      const double rA2 = (i == 0) ? 0.0 : rate(hist_AL2[i - 1], hist_AL2[i]);
+      const double rAH = (i == 0) ? 0.0 : rate(hist_AH1[i - 1], hist_AH1[i]);
+      const double rU2 = (i == 0) ? 0.0 : rate(hist_UL2[i - 1], hist_UL2[i]);
+      const double rUH = (i == 0) ? 0.0 : rate(hist_UH1[i - 1], hist_UH1[i]);
+
+      // helper: print rate cell, "  --  " for first row
+      auto rc = [i](double r) -> std::string {
+        if (i == 0)
+          return "  --  ";
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(2) << std::setw(5) << r << " ";
+        return os.str();
+      };
+
+      std::cout << "| " << std::setw(5) << (i + 1) << " | " << std::setw(7)
+                << hist_ntot[i] << " | " << std::scientific
+                << std::setprecision(3) << std::setw(9) << hist_AL2[i] << " | "
+                << rc(rA2) << "| " << std::setw(9) << hist_AH1[i] << " | "
+                << rc(rAH) << "| " << std::setw(9) << hist_UL2[i] << " | "
+                << rc(rU2) << "| " << std::setw(9) << hist_UH1[i] << " | "
+                << rc(rUH) << "|\n";
+    }
+  std::cout << hline << "\n\n";
 }
 
 // ============================================================================
