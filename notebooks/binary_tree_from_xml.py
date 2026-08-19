@@ -6,28 +6,28 @@ from scipy.optimize import brentq
 
 
 # ---- file paths ----
-XML_PATH = "graphExport.xml"         
-OUT_VTK  = "vascular_tree_physics_nonzero_pd.vtk"    # output VTK file
+XML_PATH = "graphExport_4500.xml"         
+OUT_VTK  = "liver_vascular_tree_4500.vtk"    # output VTK file
 
 # ---- unit conversion ----
 # Assume XML positions & the edge "radius" attribute are given in millimetres.
 # Everything downstream (points, radius, length) is converted to metres so it is
 # SI-consistent with E [Pa], h_wall [m], pressures [Pa], R1/R2 [Pa*s/m^3], C [m^3/Pa].
-LENGTH_SCALE = 0.1
+LENGTH_SCALE = 0.01
 
 # ---- wall material properties: ARBITRARY, deliberately very stiff, same for every vessel ----
 # Only scalability is being tested here, so there is no root/daughter split — just crank E up
 # far enough that the vessel barely distends (a0 ~ a_d), approximating a rigid Poiseuille pipe.
-E_STIFF  = 5e5 #5e7     # Young's modulus [Pa]  (very stiff; raise further to approach rigid limit)
+E_STIFF  = 1e4 #5e7     # Young's modulus [Pa]  (very stiff; raise further to approach rigid limit)
 HW_STIFF = 1e-3     # wall thickness [m]    (arbitrary, unused as a tuning knob here)
-
+RADIUS_RATIO_CAP = 8 
 # ---- reference (zero-transmural) pressure for the elastic tube law ----
 P0 = 0.0
 
 # ---- constant boundary condition: same working pressure prescribed on every vessel ----
 # (replaces the depth-interpolated pPerf -> pTerm pressure drop; arbitrary, just needs to be
 # a single fixed value so the only thing varying along the tree is geometry/resistance)
-P_CONST = 1e4   #1e3  # working pressure p_d for every vessel [Pa]
+P_CONST = 0   #1e3  # working pressure p_d for every vessel [Pa]
 
 # ---- single-resistor boundary condition, applied at terminal (leaf) nodes only ----
 # IMPORTANT — this matches BloodFlowSystem's actual convention, not a generic guess:
@@ -128,14 +128,14 @@ print(f"terminals: {terminal_counter}, "
 
 root_edge = list(G.out_edges(root_node))[0]
 ROOT_RADIUS = edge_radius[root_edge] * LENGTH_SCALE   # metres
-
+R_FLOOR     = ROOT_RADIUS / RADIUS_RATIO_CAP
 node_radius_out = {root_node: ROOT_RADIUS}   # radius of the vessel(s) leaving each node
 for parent in nx.topological_sort(G):
     children = list(G.successors(parent))
     if not children:
         continue
     rp = node_radius_out[parent]
-    rc = rp if len(children) == 1 else rp / (2.0 ** (1.0 / 3.0))
+    rc = rp if len(children) == 1 else max(rp / (2.0 ** (1.0 / 3.0)), R_FLOOR)
     for ch in children:
         node_radius_out[ch] = rc
 

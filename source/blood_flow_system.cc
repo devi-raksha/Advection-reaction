@@ -84,7 +84,7 @@ BloodFlowSystem<dim, spacedim>::BloodFlowSystem(const MPI_Comm comm)
                  dealii::FunctionParser<spacedim>::default_variable_names() +
                    ",t")
   , exact_solution("Functions",
-                   "1e-4; 0.0",
+                   "1e-4; 0.0; 1e-4; 0.0",
                    "Exact solution",
                    par,
                    dealii::FunctionParser<spacedim>::default_variable_names() +
