@@ -22,14 +22,14 @@ from svv.tree.tree import Tree
 # ==================================================================
 
 input_file  = "./trees/network_10000.tree.npz"
-output_file = "./trees/network_10000_adnr.vtk"
+output_file = "./trees/network_2k_adnr.vtk"
 
 dataset_title = "svVascularize vessel network"
 
 
 # ==================================================================
 # CONFIG  -  physiological model parameters
-# (defaults chosen to reproduce the magnitudes in 56_adnr_new.vtk)
+# (defaults chosen )
 # ==================================================================
 
 # --- wall material -------------------------------------------------
@@ -37,7 +37,7 @@ E_YOUNG = 2.25e5          # Young's modulus  [Pa]   -> field "E"
 P_D     = 1.0e4           # diastolic pressure [Pa] -> field "p_d"
 P_0     = 0.0             # reference pressure [Pa] -> field "p0"
 
-# --- Olufsen wall-thickness law:  E*h/r = k1*exp(k2*r) + k3 --------
+# --- wall-thickness law:  E*h/r = k1*exp(k2*r) + k3 --------
 #     => h = (r / E) * (k1*exp(k2*r) + k3)
 WALL_K1 = 6.538312e4
 WALL_K2 = -4.615404e2
@@ -55,7 +55,7 @@ P_OUT       = 0.0          # outlet pressure  [Pa] -> field "P_out"
 
 
 # ==================================================================
-# svVascularize data-column layout (same indices as your converter)
+# svVascularize data-column layout 
 # ==================================================================
 
 COL_PROXIMAL      = slice(0, 3)
@@ -172,6 +172,7 @@ for pidx in outlet_point_idx:
     if q <= 0.0 or not np.isfinite(q):
         continue
     R_total   = DELTA_P / q
+    #R1[pidx]  = R1_FRACTION * R_total
     R1[pidx]  = R1_FRACTION * R_total
     R2[pidx]  = R_total - R1[pidx]
     C[pidx]   = TAU / R_total
