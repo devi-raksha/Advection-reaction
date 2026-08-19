@@ -172,10 +172,12 @@ for pidx in outlet_point_idx:
     if q <= 0.0 or not np.isfinite(q):
         continue
     R_total   = DELTA_P / q
+    # dor single resistor model commentiong R1 AND C
     #R1[pidx]  = R1_FRACTION * R_total
-    R1[pidx]  = R1_FRACTION * R_total
+    R1[pidx]  = 0
     R2[pidx]  = R_total - R1[pidx]
-    C[pidx]   = TAU / R_total
+    #C[pidx]   = TAU / R_total
+    C = 0
 
 
 # ==================================================================
