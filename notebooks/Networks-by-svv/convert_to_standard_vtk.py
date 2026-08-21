@@ -11,6 +11,10 @@ file carries the same fields as the reference:
 
 Only the physiological constants in the CONFIG block below are assumptions;
 the geometry, L, r_d, areas and IDs are exact.
+
+Outlet model:
+    USE_RCR = True  -> RCR Windkessel (R1 = R1_FRACTION*R_total, R2 = rest, C = TAU/R_total)
+    USE_RCR = False -> single resistor (R1 = 0, R2 = R_total, C = 0)
 """
 
 import numpy as np
@@ -21,41 +25,55 @@ from svv.tree.tree import Tree
 # Files
 # ==================================================================
 
-input_file  = "./trees/network_10000.tree.npz"
-output_file = "./trees/network_2k_adnr.vtk"
+input_file  = "./trees/network_15000.tree.npz"
+output_file = "./trees/network_30k_adnr_new.vtk"
 
 dataset_title = "svVascularize vessel network"
 
 
 # ==================================================================
 # CONFIG  -  physiological model parameters
-# (defaults chosen )
 # ==================================================================
 
 # --- wall material -------------------------------------------------
 E_YOUNG = 2.25e5          # Young's modulus  [Pa]   -> field "E"
-P_D     = 1.0e4           # diastolic pressure [Pa] -> field "p_d"
+P_D     = 0.0 #1e4             # diastolic pressure [Pa] -> field "p_d"
 P_0     = 0.0             # reference pressure [Pa] -> field "p0"
 
-# --- wall-thickness law:  E*h/r = k1*exp(k2*r) + k3 --------
+# --- wall-thickness law:  E*h/r = k1*exp(k2*r) + k3 ----------------
 #     => h = (r / E) * (k1*exp(k2*r) + k3)
 WALL_K1 = 6.538312e4
 WALL_K2 = -4.615404e2
 WALL_K3 = 2.632577e4
 
-# --- RCR Windkessel at each outlet --------------------------------
+# --- outlet boundary model ----------------------------------------
 #     R_total = DELTA_P / Q          (Q = svVascularize terminal flow)
-#     R1 = R1_FRACTION * R_total     (characteristic impedance)
-#     R2 = R_total - R1
-#     C  = TAU / R_total             (fixed RC time constant)
-DELTA_P     = P_D - P_0    # perfusion pressure across the outlet bed [Pa]
-R1_FRACTION = 0.2
-TAU         = 0.283        # RC time constant [s]
+#
+#     DELTA_P is the driving/perfusion pressure used ONLY to scale the
+#     outlet resistance. It is kept independent of P_D / P_0 on purpose,
+#     so setting p_d = 0 and p0 = 0 does NOT force the resistances to 0.
+USE_RCR     = False      # False -> single resistor (R1 = 0, C = 0)
+DELTA_P     = 1.25e5        # perfusion pressure across the outlet bed [Pa]
+R1_FRACTION = 0.2          # only used when USE_RCR is True
+TAU         = 0.283        # RC time constant [s]  (only used when USE_RCR)
 P_OUT       = 0.0          # outlet pressure  [Pa] -> field "P_out"
 
+# Diagnostic only: the steady inflow you drive in the solver, so the script
+# can report the mean pressure drop this network will actually produce.
+# Set this to match your parameter-file "Inflow function" plateau.
+REFERENCE_INFLOW = 1.0e-6  # [m^3/s]
+
+# boundary_id codes
+#   root      -> 0
+#   outlets   -> 1, 2, 3, ...  (one per terminal, in node-id order)
+#   junctions -> 255           (matches 56_adnr_new.vtk convention; not a
+#                                real outlet, so it must sit outside the
+#                                1..n_outlets range used above)
+BID_ROOT     = 0
+BID_INTERIOR = 20055
 
 # ==================================================================
-# svVascularize data-column layout 
+# svVascularize data-column layout
 # ==================================================================
 
 COL_PROXIMAL      = slice(0, 3)
@@ -130,31 +148,38 @@ E   = np.full(n_vessels, E_YOUNG)
 p_d = np.full(n_vessels, P_D)
 p0  = np.full(n_vessels, P_0)
 
-# wall thickness (Olufsen):  h = (r/E) * (k1*exp(k2*r) + k3)
+# wall thickness:  h = (r/E) * (k1*exp(k2*r) + k3)
 h_wall = (r_d / E_YOUNG) * (WALL_K1 * np.exp(WALL_K2 * r_d) + WALL_K3)
 
 
 # ==================================================================
-# POINT_DATA  (per node)  -  boundary_id + RCR Windkessel
+# POINT_DATA  (per node)  -  boundary_id + outlet model
 # ==================================================================
 
 # classify nodes by topology
 is_proximal = np.isin(unique_nodes, proximal_node)   # acts as a parent
 is_distal   = np.isin(unique_nodes, distal_node)     # acts as a child
 
-boundary_id = np.full(n_points, 25555555555, dtype=int)      # interior by default
+boundary_id = np.full(n_points, BID_INTERIOR, dtype=int)   # interior by default
 
 # root: never appears as a child
-root_mask = ~is_distal
-boundary_id[root_mask] = 0
+boundary_id[~is_distal] = BID_ROOT
 
 # outlets: never appear as a parent -> number them 1, 2, 3, ...
 outlet_point_idx = np.where(~is_proximal)[0]
 outlet_point_idx = outlet_point_idx[np.argsort(unique_nodes[outlet_point_idx])]
+
+n_outlets = len(outlet_point_idx)
+if n_outlets >= BID_INTERIOR:
+    raise ValueError(
+        f"{n_outlets} outlets found, but BID_INTERIOR={BID_INTERIOR} would "
+        f"collide with an outlet id. Raise BID_INTERIOR above {n_outlets}."
+    )
+
 for k, pidx in enumerate(outlet_point_idx, start=1):
     boundary_id[pidx] = k
 
-# RCR values live on the outlet nodes; zero everywhere else
+# arrays are zero everywhere; only outlet nodes get filled
 R1    = np.zeros(n_points)
 R2    = np.zeros(n_points)
 C     = np.zeros(n_points)
@@ -163,21 +188,43 @@ P_out = np.full(n_points, P_OUT)
 # map each outlet node -> the vessel that terminates there (distal node)
 vessel_by_distal = {int(distal_node[i]): i for i in range(n_vessels)}
 
+skipped_outlets = []
+
 for pidx in outlet_point_idx:
     node = int(unique_nodes[pidx])
     vi   = vessel_by_distal.get(node)
     if vi is None:
+        skipped_outlets.append(node)
         continue
     q = flow[vi]
     if q <= 0.0 or not np.isfinite(q):
+        skipped_outlets.append(node)
         continue
-    R_total   = DELTA_P / q
-    # dor single resistor model commentiong R1 AND C
-    #R1[pidx]  = R1_FRACTION * R_total
-    R1[pidx]  = 0
-    R2[pidx]  = R_total - R1[pidx]
-    #C[pidx]   = TAU / R_total
-    C = 0
+    R_total = DELTA_P / q
+
+    if USE_RCR:
+        # full RCR Windkessel
+        R1[pidx] = R1_FRACTION * R_total
+        R2[pidx] = R_total - R1[pidx]
+        C[pidx]  = TAU / R_total
+    else:
+        # single-resistor model: all resistance in R2, R1 = 0, C = 0
+        R1[pidx] = 0.0
+        R2[pidx] = R_total
+        C[pidx]  = 0.0
+
+if skipped_outlets:
+    print(
+        f"WARNING: {len(skipped_outlets)} outlet node(s) had zero/invalid "
+        f"flow and were left with R1=R2=C=0 (not tagged as RCR/pressure-"
+        f"capacitor DOFs): {skipped_outlets}"
+    )
+
+# Sanity check: junctions and root must never carry R1/C (RCR-DOF markers)
+non_outlet_mask = np.ones(n_points, dtype=bool)
+non_outlet_mask[outlet_point_idx] = False
+assert np.all(R1[non_outlet_mask] == 0.0) and np.all(C[non_outlet_mask] == 0.0), \
+    "Internal error: a non-outlet node was assigned R1/C > 0."
 
 
 # ==================================================================
@@ -243,3 +290,43 @@ print(output_file)
 print(f"  points   : {n_points}")
 print(f"  vessels  : {n_vessels}")
 print(f"  outlets  : {len(outlet_point_idx)}")
+print(f"  outlet model : {'RCR' if USE_RCR else 'single resistor (R1=0, C=0)'}")
+
+# ==================================================================
+# Pressure-drop diagnostics
+#   The steady spatial pressure drop the network will produce is
+#       dP_mean = Q_in * R_parallel = DELTA_P * (Q_in / Q_design)
+#   where Q_design is the tree's total terminal (design) flow.
+# ==================================================================
+terminal_flows = np.array([
+    flow[vessel_by_distal[int(unique_nodes[p])]]
+    for p in outlet_point_idx
+    if int(unique_nodes[p]) in vessel_by_distal
+])
+q_design = float(terminal_flows.sum())
+
+outlet_R_total = R1[outlet_point_idx] + R2[outlet_point_idx]
+valid_R = outlet_R_total[outlet_R_total > 0]
+R_parallel = 1.0 / np.sum(1.0 / valid_R) if valid_R.size else float("inf")
+
+print()
+print("  --- pressure diagnostics -------------------------------")
+print(f"  total design flow  Q_design   : {q_design:.3e} m^3/s")
+print(f"  network resistance R_parallel : {R_parallel:.3e} Pa.s/m^3")
+if valid_R.size:
+    print(f"  outlet R_total range          : "
+          f"{valid_R.min():.3e} .. {valid_R.max():.3e} Pa.s/m^3")
+    dp_design = q_design * R_parallel
+    dp_actual = REFERENCE_INFLOW * R_parallel
+    print(f"  dP at design flow  ({q_design:.2e}) : {dp_design:.3e} Pa "
+          f"({dp_design/133.322:.1f} mmHg)")
+    print(f"  dP at your inflow  ({REFERENCE_INFLOW:.2e}) : {dp_actual:.3e} Pa "
+          f"({dp_actual/133.322:.1f} mmHg)")
+    if q_design > 0 and REFERENCE_INFLOW < 0.1 * q_design:
+        print("  NOTE: your inflow << design flow -> small pressure drop. "
+              "Raise the inflow toward Q_design or raise DELTA_P.")
+    if not USE_RCR:
+        print("  NOTE: USE_RCR is False -> R1=C=0 at every outlet. If your "
+              "solver picks RCR/PC-DOFs by (R1>0 and C>0), no outlet will "
+              "qualify. Set USE_RCR=True for an RCR run.")
+print("  --------------------------------------------------------")
