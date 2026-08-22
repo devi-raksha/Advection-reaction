@@ -3,21 +3,12 @@
 
 ```{toctree}
 :hidden:
+:maxdepth: 1
 
 overview
-installation
-configuration
-reference/parameter-reference
-outputs
-testing
-documentation
-repository-layout
 getting-started
-build-and-run
-tutorials/index
-tutorials/single-vessel-mms
-background
 math
+tutorials
+api
 references
-api/library_root
 ```

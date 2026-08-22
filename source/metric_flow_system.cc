@@ -139,10 +139,10 @@ MetricFlowSystem<dim, spacedim>::initialize_params(const std::string &filename)
 
   AssertThrow(outlet_type == "RCR" || outlet_type == "Reflection" ||
                 outlet_type == "Single Resistance",
-              ExcMessage("Unknown outlet boundary condition type: " +
-                         outlet_type +
-                         ". Supported values are RCR, Reflection, and "
-                         "Single Resistance."));
+              ExcMessage(
+                "Unknown outlet boundary condition type: " + outlet_type +
+                ". Supported values are RCR, Reflection, and "
+                "Single Resistance."));
 
   if (numerical_flux_type_str == "HLL")
     numerical_flux_type = NumericalFluxType::HLL;
@@ -789,7 +789,8 @@ MetricFlowSystem<dim, spacedim>::get_face_trace(
 // dependence on the two incident cells, assembled in build_trace_sparsity().
 template <int dim, int spacedim>
 void
-MetricFlowSystem<dim, spacedim>::build_cell_sparsity(DynamicSparsityPattern &dsp)
+MetricFlowSystem<dim, spacedim>::build_cell_sparsity(
+  DynamicSparsityPattern &dsp)
 {
   std::vector<types::global_dof_index> ldofs(fe->n_dofs_per_cell());
   std::vector<types::global_dof_index> nb_dofs(fe->n_dofs_per_cell());
@@ -1174,7 +1175,7 @@ MetricFlowSystem<dim, spacedim>::initialize_terminal_capacitors()
 template <int dim, int spacedim>
 void
 MetricFlowSystem<dim, spacedim>::compute_initial_solution(VectorType &dst,
-                                                         const double /*t*/)
+                                                          const double /*t*/)
 {
   TimerOutput::Scope timer(computing_timer, "compute_initial_solution");
 
@@ -1245,7 +1246,7 @@ MetricFlowSystem<dim, spacedim>::compute_initial_solution(VectorType &dst,
 template <int dim, int spacedim>
 void
 MetricFlowSystem<dim, spacedim>::initialize_trace_unknowns(VectorType  &sol,
-                                                          const double t)
+                                                           const double t)
 {
   TimerOutput::Scope timer(computing_timer, "initialize_trace_unknowns");
 
@@ -1500,7 +1501,7 @@ MetricFlowSystem<dim, spacedim>::open_csv_files()
 template <int dim, int spacedim>
 void
 MetricFlowSystem<dim, spacedim>::write_csv_row(const double      t,
-                                              const VectorType &sol)
+                                               const VectorType &sol)
 {
   const unsigned int dofs_per_cell = fe->n_dofs_per_cell();
 
@@ -1560,15 +1561,15 @@ MetricFlowSystem<dim, spacedim>::close_csv_files()
 template <int dim, int spacedim>
 std::array<double, 2>
 MetricFlowSystem<dim, spacedim>::hll_flux(const double       bn_L,
-                                         const double       bn_R,
-                                         const double       A_L,
-                                         const double       U_L,
-                                         const double       A_R,
-                                         const double       U_R,
-                                         const unsigned int vid_L,
-                                         const unsigned int vid_R,
-                                         const double       ad_L,
-                                         const double       ad_R) const
+                                          const double       bn_R,
+                                          const double       A_L,
+                                          const double       U_L,
+                                          const double       A_R,
+                                          const double       U_R,
+                                          const unsigned int vid_L,
+                                          const unsigned int vid_R,
+                                          const double       ad_L,
+                                          const double       ad_R) const
 {
   const double c_L   = compute_wave_speed(A_L, vid_L, ad_L);
   const double c_R   = compute_wave_speed(A_R, vid_R, ad_R);
@@ -1604,19 +1605,19 @@ MetricFlowSystem<dim, spacedim>::hll_flux(const double       bn_L,
 template <int dim, int spacedim>
 std::array<double, 2>
 MetricFlowSystem<dim, spacedim>::hll_flux_jac(const double       bn_L,
-                                             const double       bn_R,
-                                             const double       A_L,
-                                             const double       U_L,
-                                             const double       A_R,
-                                             const double       U_R,
-                                             const double       dA_L,
-                                             const double       dU_L,
-                                             const double       dA_R,
-                                             const double       dU_R,
-                                             const unsigned int vid_L,
-                                             const unsigned int vid_R,
-                                             const double       ad_L,
-                                             const double       ad_R) const
+                                              const double       bn_R,
+                                              const double       A_L,
+                                              const double       U_L,
+                                              const double       A_R,
+                                              const double       U_R,
+                                              const double       dA_L,
+                                              const double       dU_L,
+                                              const double       dA_R,
+                                              const double       dU_R,
+                                              const unsigned int vid_L,
+                                              const unsigned int vid_R,
+                                              const double       ad_L,
+                                              const double       ad_R) const
 {
   const double c_L   = compute_wave_speed(A_L, vid_L, ad_L);
   const double c_R   = compute_wave_speed(A_R, vid_R, ad_R);
@@ -1654,15 +1655,15 @@ MetricFlowSystem<dim, spacedim>::hll_flux_jac(const double       bn_L,
 template <int dim, int spacedim>
 std::array<double, 2>
 MetricFlowSystem<dim, spacedim>::hll_hdg_flux(const double bn_L,
-                                             const double /*bn_R*/,
-                                             const double A_L,
-                                             const double U_L, // interior U_e
-                                             const double A_R,
-                                             const double U_R, // trace U_b
-                                             const unsigned int /*vid_L*/,
-                                             const unsigned int vid_R,
-                                             const double /*ad_L*/,
-                                             const double ad_R) const
+                                              const double /*bn_R*/,
+                                              const double A_L,
+                                              const double U_L, // interior U_e
+                                              const double A_R,
+                                              const double U_R, // trace U_b
+                                              const unsigned int /*vid_L*/,
+                                              const unsigned int vid_R,
+                                              const double /*ad_L*/,
+                                              const double ad_R) const
 {
   // Stabilization from TRACE state only (eq. 37 of Vila-Perez et
   // al.)
@@ -1734,15 +1735,15 @@ MetricFlowSystem<dim, spacedim>::hll_hdg_flux_jac(
 template <int dim, int spacedim>
 std::array<double, 2>
 MetricFlowSystem<dim, spacedim>::lf_flux(const double       bn_L,
-                                        const double       bn_R,
-                                        const double       A_L,
-                                        const double       U_L,
-                                        const double       A_R,
-                                        const double       U_R,
-                                        const unsigned int vid_L,
-                                        const unsigned int vid_R,
-                                        const double       ad_L,
-                                        const double       ad_R) const
+                                         const double       bn_R,
+                                         const double       A_L,
+                                         const double       U_L,
+                                         const double       A_R,
+                                         const double       U_R,
+                                         const unsigned int vid_L,
+                                         const unsigned int vid_R,
+                                         const double       ad_L,
+                                         const double       ad_R) const
 {
   const double FAL = scalar_area_flux(bn_L, A_L, U_L);
   const double FUL = scalar_momentum_flux(
@@ -1764,19 +1765,19 @@ MetricFlowSystem<dim, spacedim>::lf_flux(const double       bn_L,
 template <int dim, int spacedim>
 std::array<double, 2>
 MetricFlowSystem<dim, spacedim>::lf_flux_jac(const double       bn_L,
-                                            const double       bn_R,
-                                            const double       A_L,
-                                            const double       U_L,
-                                            const double       A_R,
-                                            const double       U_R,
-                                            const double       dA_L,
-                                            const double       dU_L,
-                                            const double       dA_R,
-                                            const double       dU_R,
-                                            const unsigned int vid_L,
-                                            const unsigned int vid_R,
-                                            const double       ad_L,
-                                            const double       ad_R) const
+                                             const double       bn_R,
+                                             const double       A_L,
+                                             const double       U_L,
+                                             const double       A_R,
+                                             const double       U_R,
+                                             const double       dA_L,
+                                             const double       dU_L,
+                                             const double       dA_R,
+                                             const double       dU_R,
+                                             const unsigned int vid_L,
+                                             const unsigned int vid_R,
+                                             const double       ad_L,
+                                             const double       ad_R) const
 {
   const double c2L = compute_wave_speed(A_L, vid_L, ad_L);
   const double c2R = compute_wave_speed(A_R, vid_R, ad_R);
@@ -2457,9 +2458,9 @@ MetricFlowSystem<dim, spacedim>::assemble_jacobian_trace_continuity_block()
 template <int dim, int spacedim>
 void
 MetricFlowSystem<dim, spacedim>::assemble_residual(const double      t,
-                                                  const VectorType &y,
-                                                  const VectorType &ydot,
-                                                  VectorType       &residual)
+                                                   const VectorType &y,
+                                                   const VectorType &ydot,
+                                                   VectorType       &residual)
 {
   TimerOutput::Scope timer(computing_timer, "assemble_residual");
   if (verbosity > 1)
@@ -2531,9 +2532,9 @@ MetricFlowSystem<dim, spacedim>::assemble_residual(const double      t,
 template <int dim, int spacedim>
 void
 MetricFlowSystem<dim, spacedim>::assemble_jacobian(const double      t,
-                                                  const VectorType &y,
-                                                  const VectorType & /*ydot*/,
-                                                  const double alpha)
+                                                   const VectorType &y,
+                                                   const VectorType & /*ydot*/,
+                                                   const double alpha)
 {
   TimerOutput::Scope timer(computing_timer, "assemble_jacobian");
   if (verbosity > 1)
@@ -3390,7 +3391,7 @@ MetricFlowSystem<dim, spacedim>::assemble_jacobian_trace_junction_block(
 template <int dim, int spacedim>
 void
 MetricFlowSystem<dim, spacedim>::compute_pressure(const VectorType &y,
-                                                 VectorType       &p) const
+                                                  VectorType       &p) const
 {
   TimerOutput::Scope timer(computing_timer, "compute_pressure");
 
@@ -3431,8 +3432,8 @@ MetricFlowSystem<dim, spacedim>::compute_pressure(const VectorType &y,
 template <int dim, int spacedim>
 void
 MetricFlowSystem<dim, spacedim>::output_results(const VectorType  &y,
-                                               const VectorType  &pressure_vec,
-                                               const unsigned int cycle) const
+                                                const VectorType  &pressure_vec,
+                                                const unsigned int cycle) const
 {
   TimerOutput::Scope timer(computing_timer, "output_results");
 

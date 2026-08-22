@@ -17,3 +17,9 @@ These blocks are assembled into one distributed vector. IDA treats cell and capa
 The source provides HLL, HLL-HDG, and Lax-Friedrichs flux implementations and their linearizations. Select them with the exact strings `HLL`, `HLL_HDG`, or `LAX_FRIEDRICHS`. The time integrator is SUNDIALS IDA, not ARKode. Newton systems use either the configured direct PETSc/Trilinos path or GMRES with ILU; see [Configuration](configuration.md).
 
 For installation and commands, see [Installation and build/run](installation.md). For generated files, see [Outputs](outputs.md).
+
+```{include} background.md
+```
+
+```{include} repository-layout.md
+```

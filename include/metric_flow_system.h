@@ -157,7 +157,7 @@ struct MetricFlowCopyData
   FullMatrix<double>                   cell_matrix;
   Vector<double>                       cell_rhs;
   std::vector<types::global_dof_index> local_dof_indices;
-  std::vector<MetricFlowCopyDataFace>   face_data;
+  std::vector<MetricFlowCopyDataFace>  face_data;
 
   template <class Iterator>
   void

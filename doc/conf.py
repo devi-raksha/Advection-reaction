@@ -24,8 +24,6 @@ exclude_patterns = [
     ".DS_Store",
     "html",
     "_static/**",
-    # Development audits are internal records, not public documentation.
-    "development/**",
 ]
 
 # Suppress specific warnings that are benign for this repository build.
@@ -119,7 +117,21 @@ def remove_operator_doxygenfunctions(app, env, docnames):
     _strip_operator_doxygenfunctions(api_dir)
 
 
+def mark_generated_api_root_orphan(app):
+    """Mark Exhale's linked API root as intentionally outside the toctree."""
+    path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "api", "library_root.rst")
+    try:
+        with io.open(path, "r", encoding="utf-8") as fh:
+            contents = fh.read()
+        if not contents.startswith(":orphan:"):
+            with io.open(path, "w", encoding="utf-8") as fh:
+                fh.write(":orphan:\n\n" + contents)
+    except OSError:
+        pass
+
+
 def setup(app):
+    app.connect("builder-inited", mark_generated_api_root_orphan)
     app.connect("env-before-read-docs", remove_operator_doxygenfunctions)
 
 

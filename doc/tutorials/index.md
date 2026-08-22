@@ -22,5 +22,5 @@ computationally by 77 vessel segments. The tutorial records that identity and th
 selected `56_adnr_new.vtk` input, while keeping missing source/license details,
 raw reference data, and runtime provenance visibly pending.
 
-See [result provenance](../development/result-provenance.md) for the evidence status
-of these inputs and result artifacts.
+The evidence status of these inputs and result artifacts remains part of the
+repository's reproducibility record.
