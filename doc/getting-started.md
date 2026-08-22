@@ -13,9 +13,6 @@ The first two commands configure and build the current CMake targets. CMake copi
 ```{include} installation.md
 ```
 
-```{include} build-and-run.md
-```
-
 ```{include} configuration.md
 ```
 
