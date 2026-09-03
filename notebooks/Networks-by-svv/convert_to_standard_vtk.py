@@ -1,6 +1,5 @@
 """
 Convert an svVascularize .tree(.npz) network into a legacy ASCII VTK file
-that matches the format of `56_adnr_new.vtk`.
 
 Geometry, length and radius come straight from svVascularize.
 Everything else is derived with standard 1-D hemodynamics relations so the
@@ -19,15 +18,14 @@ Outlet model:
 
 import numpy as np
 from svv.tree.tree import Tree
-
+import matplotlib.pyplot as plt
 
 # ==================================================================
 # Files
 # ==================================================================
 
-input_file  = "./trees/network_15000.tree.npz"
-output_file = "./trees/network_30k_adnr_new.vtk"
-
+input_file  = "./trees/network_50000.tree.npz"
+output_file = "./trees/network_100k_adnr.vtk"
 dataset_title = "svVascularize vessel network"
 
 
@@ -36,8 +34,8 @@ dataset_title = "svVascularize vessel network"
 # ==================================================================
 
 # --- wall material -------------------------------------------------
-E_YOUNG = 2.25e5          # Young's modulus  [Pa]   -> field "E"
-P_D     = 0.0 #1e4             # diastolic pressure [Pa] -> field "p_d"
+E_YOUNG = 2.25e4          # Young's modulus  [Pa]   -> field "E"
+P_D     = 0.0        # diastolic pressure [Pa] -> field "p_d"
 P_0     = 0.0             # reference pressure [Pa] -> field "p0"
 
 # --- wall-thickness law:  E*h/r = k1*exp(k2*r) + k3 ----------------
@@ -53,7 +51,7 @@ WALL_K3 = 2.632577e4
 #     outlet resistance. It is kept independent of P_D / P_0 on purpose,
 #     so setting p_d = 0 and p0 = 0 does NOT force the resistances to 0.
 USE_RCR     = False      # False -> single resistor (R1 = 0, C = 0)
-DELTA_P     = 1.25e5        # perfusion pressure across the outlet bed [Pa]
+DELTA_P     = 1.25e5      # perfusion pressure across the outlet bed [Pa]
 R1_FRACTION = 0.2          # only used when USE_RCR is True
 TAU         = 0.283        # RC time constant [s]  (only used when USE_RCR)
 P_OUT       = 0.0          # outlet pressure  [Pa] -> field "P_out"
@@ -61,8 +59,47 @@ P_OUT       = 0.0          # outlet pressure  [Pa] -> field "P_out"
 # Diagnostic only: the steady inflow you drive in the solver, so the script
 # can report the mean pressure drop this network will actually produce.
 # Set this to match your parameter-file "Inflow function" plateau.
-REFERENCE_INFLOW = 1.0e-6  # [m^3/s]
+REFERENCE_INFLOW = 1.0e-3  # [m^3/s]
 
+# ##########
+
+# R_PARALLEL     = 4.0e4                      # from your diagnostics [Pa.s/m^3]
+# DELTA_P_TARGET = 100.0 * 133.322           # peak pressure drop you want [Pa] (100 mmHg here)
+# Q_PEAK         = DELTA_P_TARGET / R_PARALLEL   # -> ~0.333 m^3/s
+
+# T_PEAK = 0.2      # where the pulse peaks
+# ALPHA  = 4.0      # sharpness: larger = narrower pulse
+# Q_BASE = 1e-4     # set >0 (e.g. 0.05*Q_PEAK) if you want a nonzero diastolic baseline
+
+# def inflow(t):
+#     x = t / T_PEAK
+#     shape = (x**ALPHA) * np.exp(ALPHA * (1.0 - x))   # = 1 at t=T_PEAK, 0 at t=0
+#     return Q_BASE + (Q_PEAK - Q_BASE) * shape
+
+# # Print the expression
+# print(
+#     f"Q(t) = {Q_BASE:.6f} + "
+#     f"({Q_PEAK:.6f} - {Q_BASE:.6f}) * "
+#     f"(t/{T_PEAK:.3f})^{ALPHA:.1f} * "
+#     f"exp({ALPHA:.1f} * (1 - t/{T_PEAK:.3f}))"
+# )
+
+# # Time points for plotting
+# t_values = np.linspace(0, 1.0, 500)
+
+# # Compute Q(t)
+# Q_values = inflow(t_values)
+
+# # Plot
+# plt.figure(figsize=(8, 5))
+# plt.plot(t_values, Q_values, linewidth=2)
+
+# plt.xlabel("Time t")
+# plt.ylabel("Inflow Q(t)")
+# plt.title("Inflow profile Q(t)")
+# plt.grid(True)
+
+# plt.show()
 # boundary_id codes
 #   root      -> 0
 #   outlets   -> 1, 2, 3, ...  (one per terminal, in node-id order)
@@ -70,7 +107,7 @@ REFERENCE_INFLOW = 1.0e-6  # [m^3/s]
 #                                real outlet, so it must sit outside the
 #                                1..n_outlets range used above)
 BID_ROOT     = 0
-BID_INTERIOR = 20055
+BID_INTERIOR = 300655
 
 # ==================================================================
 # svVascularize data-column layout
