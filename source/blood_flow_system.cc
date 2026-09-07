@@ -4033,7 +4033,7 @@ BloodFlowSystem<dim, spacedim>::run()
         time = t;
         compute_pressure(sol, pressure);
         output_results(sol, pressure, step_number);
-        write_csv_row(t, sol);
+        // write_csv_row(t, sol);
         if (verbosity > 0)
           {
             check_mass_conservation(sol, t);
